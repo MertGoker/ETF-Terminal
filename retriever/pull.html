@@ -1,0 +1,35 @@
+<!doctype html><meta charset="utf-8"><title>Retriever bridge</title>
+<style>body{font:13px ui-monospace,monospace;background:#0b0f14;color:#e4edf4;padding:18px;line-height:1.6}
+b{color:#d9a24b}.ok{color:#36b07f}.bad{color:#e0604d}#log{white-space:pre-wrap}</style>
+<h3>Retriever bridge <b id="st">starting…</b></h3><div id="log"></div>
+<script>
+const SY = ["SPY","QQQ","IWM","XLK","SMH","GLD","TLT","ARKK","TUR",
+            "ZPX30.IS","ISX30.IS","GLDTR.IS","APGLD.IS","ZPLIB.IS","ZTM25.IS","ISGLK.IS","Z30KE.IS"];
+const P1 = Math.floor(Date.UTC(2020,0,1)/1000), P2 = Math.floor(Date.now()/1000);
+const log = (m,c) => { const d=document.createElement('div'); d.className=c||''; d.textContent=m;
+                       document.getElementById('log').appendChild(d); };
+const sleep = ms => new Promise(r=>setTimeout(r,ms));
+let ok=0, bad=0;
+(async () => {
+  const jobs=[];
+  for (const s of SY) { jobs.push([s,'1h',`interval=1h&range=730d`]);
+                        jobs.push([s,'1d',`interval=1d&period1=${P1}&period2=${P2}`]); }
+  for (const [sym,iv,qs] of jobs) {
+    let txt=null, status=0;
+    try {
+      const r = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?${qs}`);
+      status = r.status; txt = await r.text();
+    } catch(e) { log(`FETCH ${sym} ${iv} -> ${e}`,'bad'); bad++; await sleep(350); continue; }
+    if (status!==200) { log(`HTTP ${status} ${sym} ${iv}`,'bad'); bad++; await sleep(600); continue; }
+    let n=0;
+    try { const j=JSON.parse(txt); n=((j.chart.result||[])[0]||{}).timestamp?.length||0; } catch(e){}
+    if (!n) { log(`EMPTY ${sym} ${iv}`,'bad'); bad++; await sleep(350); continue; }
+    await fetch(`/save?name=${encodeURIComponent(sym.replace('.IS','')+'__'+iv)}`,
+                {method:'POST',headers:{'Content-Type':'text/plain'},body:txt});
+    log(`ok ${sym.padEnd(10)} ${iv.padEnd(3)} ${n} bars`,'ok'); ok++;
+    document.getElementById('st').textContent = `${ok} saved / ${bad} failed`;
+    await sleep(320);
+  }
+  document.getElementById('st').textContent = `DONE — ${ok} saved / ${bad} failed`;
+})();
+</script>
