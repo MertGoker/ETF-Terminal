@@ -1,7 +1,7 @@
 # Bourse ETF Terminal
 
-Price history for **2,093 exchange-traded funds** across the **United States**
-(2,057) and **Borsa İstanbul** (36) — a
+Price history for **7,796 funds** across the **United States** (5,692 ETFs)
+and **Türkiye** (2,104 TEFAS funds) — a
 TradingView-style chart, thirteen time steps from one hour to one year, and
 one-click Excel export of whatever window you are looking at.
 
@@ -346,9 +346,8 @@ vercel.json            static config — output directory web/
 - Prices are **unadjusted last-traded values** — no dividend or split
   adjustment is applied. Use them for study and coursework, not for
   performance attribution.
-- The dataset ships with **2,093 funds — 2,057 US and 36 Borsa İstanbul**. The US
-  side is the Nasdaq symbol directory via `us_universe.py`; the Turkish side is the
-  complete TEFAS BYF registry. Tickers the venue does not classify as an
-  ETF are rejected by the retriever, so guessed BIST codes that turn out to be
-  ordinary listed companies never reach the dashboard.
+- The dataset ships with **7,796 funds — 5,692 US and 2,104 Turkish**. That is the
+  whole reachable universe: 5,692 of the 5,771 ETFs in the Nasdaq symbol directory
+  return usable history, and 2,104 of TEFAS's 2,173 funds do — the other 69 are
+  published with a price of 0.00 every day, so they are skipped rather than charted.
 - Nothing in this repository is investment advice.

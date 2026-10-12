@@ -56,6 +56,32 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(204); self._cors(); self.end_headers()
 
     def do_GET(self):
+        if self.path.startswith("/go"):
+            # Hand a batch of tickers to the collector without retyping them:
+            # bounce the browser to the provider's own origin with the list in
+            # the URL fragment, which never reaches a server and so is not
+            # length-limited the way a query string is.
+            from urllib.parse import urlparse, parse_qs
+            q = parse_qs(urlparse(self.path).query)
+            n = (q.get("n") or ["1"])[0]
+            chunk = os.path.join(RAW, "..", "chunks", f"{n}.txt")
+            try:
+                with open(os.path.abspath(chunk), encoding="utf-8") as fh:
+                    syms = fh.read().strip()
+            except OSError:
+                syms = ""
+            target = ("https://query1.finance.yahoo.com/v8/finance/chart/"
+                      "SPY?interval=1d&range=5d#" + syms)
+            page = (f"<!doctype html><meta charset=utf-8>"
+                    f"<title>batch {n}</title>"
+                    f"<script>location.replace({json.dumps(target)})</script>"
+                    f"<p>batch {n}: {len(syms.split(',')) if syms else 0} symbols</p>"
+                    ).encode()
+            self.send_response(200); self._cors()
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(page)))
+            self.end_headers(); self.wfile.write(page)
+            return
         if self.path.startswith("/symbols"):
             body = json.dumps(self._missing()).encode()
             self.send_response(200); self._cors()

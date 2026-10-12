@@ -277,6 +277,7 @@ def write_prices(funds, data_dir, months, replace, workers=4):
     from datetime import datetime, timezone
 
     sys.path.insert(0, HERE)
+    from classify import classify_tr
     from fetch_etfs import YTD_ANCHOR, load_all, summarise, write_manifest
     from resample import compact
 
@@ -312,7 +313,7 @@ def write_prices(funds, data_dir, months, replace, workers=4):
             return f, None, "no usable history"
         rec["fetchedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         rec["series"]["1d"] = compact(rec["series"]["1d"])
-        rec["stats"] = summarise(rec["series"]["1d"], {})
+        rec["stats"] = summarise(rec["series"]["1d"], {}, "nav")
         _t.sleep(0.25)          # be gentle with a public service
         return f, rec, None
 
@@ -413,7 +414,10 @@ def to_record(fund: dict, rows: list[dict]) -> dict | None:
         "display": fund["code"],
         "name": fund.get("title") or rows[-1].get("title") or fund["code"],
         "market": "TR",
-        "category": categorise(fund),
+        "category": classify_tr(fund.get("title") or "", fund.get("type") or "",
+                                fund.get("fundClass") == "etf")[0],
+        "theme": classify_tr(fund.get("title") or "", fund.get("type") or "",
+                             fund.get("fundClass") == "etf")[1],
         "currency": "TRY",
         "exchange": ("Borsa İstanbul (BYF Pazarı)" if fund.get("fundClass") == "etf"
                      else "TEFAS"),

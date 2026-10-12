@@ -103,6 +103,8 @@ const S = {
   sort: { key: 'display', dir: 1 },
   filter: '',
   category: '',
+  theme: '',             // specific theme filter, e.g. 'Semiconductors'
+  themes: null,          // themes.json, loaded once
   bars: [],             // current resampled window
   loading: false,
 };
@@ -462,6 +464,7 @@ function summaryRows(a) {
     ['Exchange', etf.exchange || '—'],
     ['Currency', etf.currency],
     ['Category', etf.category],
+    ['Theme', etf.theme || '—'],
     [],
     ['Time step', tf.label],
     ['Period selected', r.custom ? `${S.custom.from} → ${S.custom.to}` : r.label],
@@ -561,6 +564,23 @@ async function deliver(filename, blob) {
   return { ok: true, msg: `Downloaded ${filename}` };
 }
 
+/* SheetJS is ~880 KB and only earns its place when someone actually
+   exports, so it is fetched on the first click rather than on every page
+   load. */
+let xlsxReady = null;
+function loadXlsx() {
+  if (window.XLSX) return Promise.resolve();
+  if (xlsxReady) return xlsxReady;
+  xlsxReady = new Promise((resolve, reject) => {
+    const el = document.createElement('script');
+    el.src = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
+    el.onload = () => resolve();
+    el.onerror = () => { xlsxReady = null; reject(new Error('spreadsheet library failed to load')); };
+    document.head.appendChild(el);
+  });
+  return xlsxReady;
+}
+
 async function doExport(kind) {
   const msg = document.getElementById('exMsg');
   const setMsg = (t, s) => { if (msg) { msg.textContent = t; msg.dataset.s = s || ''; } };
@@ -575,6 +595,7 @@ async function doExport(kind) {
       blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' });
       name = fileStem() + '.csv';
     } else {
+      await loadXlsx();
       const out = XLSX.write(buildWorkbook(), { bookType: 'xlsx', type: 'array' });
       blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
       name = fileStem() + '.xlsx';
@@ -616,6 +637,7 @@ function shellHTML() {
         <input class="search" id="search" type="search" placeholder="Filter ticker or name" aria-label="Filter instruments">
         <select class="sel" id="catSel" aria-label="Filter by category"></select>
       </div>
+      <div class="theme-bar" id="themeBar"></div>
       <div class="lhead">
         <button data-sort="display">Instrument</button>
         <button data-sort="last">Last</button>
@@ -646,6 +668,7 @@ function wsHTML() {
         <span class="ticker" id="iTicker">—</span>
         <span class="chip chip-mkt" id="iMkt">—</span>
         <span class="chip" id="iCat">—</span>
+        <span class="chip" id="iTheme" hidden></span>
         <span class="chip" id="iClass" hidden></span>
       </div>
       <div class="ident-nm" id="iName">—</div>
@@ -748,7 +771,7 @@ function renderTabs() {
   el.querySelectorAll('.mtab').forEach(b => b.onclick = async () => {
     const m = b.dataset.market;
     if (!S.manifest.markets[m] || m === S.market) return;
-    S.market = m; S.category = ''; S.filter = '';
+    S.market = m; S.category = ''; S.theme = ''; S.filter = '';
     const box = document.getElementById('search'); if (box) box.value = '';
     renderTabs(); renderCats();
     await ensureRows(m);
@@ -758,12 +781,28 @@ function renderTabs() {
   });
 }
 
+/* One control, two levels: pick a whole category or a single theme inside
+   it. Themes are what cross-fund comparison works in, so they are the
+   selectable leaves rather than a second dropdown to hunt through. */
 function renderCats() {
   const sel = document.getElementById('catSel');
   const mk = S.manifest.markets[S.market];
-  const cats = mk ? mk.categories : [];
-  sel.innerHTML = `<option value="">All sectors</option>` +
-    cats.map(c => `<option value="${c}"${c === S.category ? ' selected' : ''}>${c}</option>`).join('');
+  if (!mk) { sel.innerHTML = ''; return; }
+  const byCat = mk.themesByCategory || {};
+  const counts = {};
+  for (const e of (S.rows[S.market] || [])) counts[e.h] = (counts[e.h] || 0) + 1;
+
+  let html = `<option value="">All sectors &amp; themes</option>`;
+  for (const cat of (mk.categories || [])) {
+    html += `<optgroup label="${cat}">`;
+    html += `<option value="c:${cat}"${S.category === cat && !S.theme ? ' selected' : ''}>All ${cat}</option>`;
+    for (const th of (byCat[cat] || [])) {
+      const n = counts[th] || 0;
+      html += `<option value="t:${th}"${S.theme === th ? ' selected' : ''}>${th} (${n})</option>`;
+    }
+    html += `</optgroup>`;
+  }
+  sel.innerHTML = html;
 }
 
 /* -------------------------------------------------------------- instrument list */
@@ -774,6 +813,7 @@ function visibleEtfs() {
   if (!rows) return [];
   const q = S.filter.trim().toLowerCase();
   const list = rows.filter(e =>
+    (!S.theme || e.h === S.theme) &&
     (!S.category || e.c === S.category) &&
     (!q || e.d.toLowerCase().includes(q) || (e.n || '').toLowerCase().includes(q)));
   const key = SORT_FIELD[S.sort.key] || 'd';
@@ -784,6 +824,40 @@ function visibleEtfs() {
     return ((av ?? -Infinity) - (bv ?? -Infinity)) * dir;
   });
   return list;
+}
+
+async function ensureThemes() {
+  if (S.themes) return S.themes;
+  try {
+    const res = await fetch(DATA + 'themes.json', { cache: 'default' });
+    S.themes = res.ok ? (await res.json()).themes : [];
+  } catch (_) {
+    S.themes = [];
+  }
+  return S.themes;
+}
+
+/* With a theme selected the list stops being a list of funds and becomes a
+   peer group, so show how that group is doing rather than making someone
+   open its members one at a time. */
+function renderThemeBar() {
+  const el = document.getElementById('themeBar');
+  if (!el) return;
+  if (!S.theme || !S.themes) { el.dataset.on = '0'; return; }
+  const t = S.themes.find(x => x.market === S.market && x.theme === S.theme);
+  if (!t) { el.dataset.on = '0'; return; }
+  el.dataset.on = '1';
+  const cell = (k, v, cls) =>
+    `<div class="tb"><div class="tb-k">${k}</div><div class="tb-v ${cls || ''}">${v}</div></div>`;
+  el.innerHTML =
+    `<div class="theme-bar-name">${t.theme} · ${t.count} funds</div>
+     <div class="theme-bar-grid">
+       ${cell('Median YTD', pf(t.medianYtdPct), sign(t.medianYtdPct))}
+       ${cell('Best', pf(t.bestYtdPct), sign(t.bestYtdPct))}
+       ${cell('Worst', pf(t.worstYtdPct), sign(t.worstYtdPct))}
+     </div>` + (t.flagged
+       ? `<div class="tb-k" style="margin-top:6px;color:var(--down)">${t.flagged} fund${t.flagged > 1 ? 's' : ''} excluded — reporting break</div>`
+       : '');
 }
 
 async function ensureRows(market) {
@@ -823,7 +897,8 @@ function rowHTML(e) {
       <span class="row-nm">${e.n || ''}</span>
     </span>
     <span class="row-last">${nf(e.l, d)}</span>
-    <span class="row-chg" data-s="${s === 'up' ? 'u' : s === 'down' ? 'd' : ''}">${pf(e.p)}</span>
+    <span class="row-chg" data-s="${s === 'up' ? 'u' : s === 'down' ? 'd' : ''}"
+      ${e.x ? 'title="reporting break in this fund\u2019s price series"' : ''}>${e.x ? '⚠' : pf(e.p)}</span>
     ${sparkline(decodeSpark(e.k), (e.y ?? e.p ?? 0) >= 0)}
   </button>`;
 }
@@ -930,6 +1005,13 @@ function renderInstrument() {
   mk.textContent = e.market === 'US' ? 'United States' : 'Türkiye';
   mk.dataset.m = e.market;
   document.getElementById('iCat').textContent = e.category;
+  const th = document.getElementById('iTheme');
+  if (th) {
+    th.hidden = !e.theme || e.theme === 'Unclassified';
+    th.textContent = e.theme || '';
+    th.style.borderColor = 'var(--accent)';
+    th.style.color = 'var(--accent)';
+  }
   // An exchange-traded fund and an open-ended mutual fund behave very
   // differently; the header says which one you are looking at.
   const cls = document.getElementById('iClass');
@@ -1009,6 +1091,22 @@ function renderNote(from) {
   if (!base) {
     el.hidden = false;
     el.textContent = `No ${tf.base} data stored for ${S.etf.display}. Re-run the retriever with --intervals ${tf.base}.`;
+    return;
+  }
+  // A reporting break makes every return through it meaningless; say so
+  // before anyone reads a number off this chart.
+  const brk = (S.etf.stats || {}).priceBreak;
+  if (brk) {
+    el.hidden = false;
+    el.textContent =
+      (brk.kind === 'collapse'
+        ? `${S.etf.display}'s published net asset value has fallen to ${(brk.ratio * 100).toFixed(3)}% of its peak, which an open-ended fund does not do — it would be wound up first. This is a reporting problem at the source, not performance. The fund is left out of its theme's averages and its returns should not be used.`
+        : `${S.etf.display}'s published price steps by ${brk.ratio < 1
+        ? '÷' + Math.round(1 / brk.ratio).toLocaleString()
+        : '×' + Math.round(brk.ratio).toLocaleString()} on ${brk.date}. ` +
+      `Dozens of funds break on the same date, so this is a change at the source, not a price move. ` +
+      `It is reported rather than corrected, and this fund is left out of its theme's averages — ` +
+      `treat returns spanning ${brk.date} as unusable.`);
     return;
   }
   if (isNav(S.etf) && TF_BY_ID[S.tf].mode !== 'none') {
@@ -1129,7 +1227,14 @@ async function boot() {
   renderCats();
 
   document.getElementById('search').oninput = e => { S.filter = e.target.value; renderList(); };
-  document.getElementById('catSel').onchange = e => { S.category = e.target.value; renderList(); };
+  document.getElementById('catSel').onchange = e => {
+    const v = e.target.value;
+    S.category = v.startsWith('c:') ? v.slice(2) : '';
+    S.theme = v.startsWith('t:') ? v.slice(2) : '';
+    if (S.theme) ensureThemes().then(() => { renderThemeBar(); });
+    else renderThemeBar();
+    renderList();
+  };
   document.querySelectorAll('.lhead [data-sort]').forEach(b => b.onclick = () => {
     const k = b.dataset.sort;
     S.sort = { key: k, dir: S.sort.key === k ? -S.sort.dir : (k === 'display' ? 1 : -1) };

@@ -27,6 +27,14 @@ class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *a, **kw):
         super().__init__(*a, directory=ROOT, **kw)
 
+    def end_headers(self):
+        if "Cache-Control" not in self._headers_buffer_names():
+            self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
+    def _headers_buffer_names(self):
+        return b"".join(getattr(self, "_headers_buffer", [])).decode("latin-1", "replace")
+
     def send_head(self):
         path = self.translate_path(self.path)
         if os.path.isdir(path):
@@ -51,7 +59,9 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Content-Type", self.guess_type(path))
         self.send_header("Content-Encoding", "gzip")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "public, max-age=60")
+        # No caching in development: a stale app.js against a fresh
+        # index.html produces errors that look like real bugs.
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         return io.BytesIO(body)
 

@@ -1373,7 +1373,7 @@
    "code": "KNP",
    "title": "AK PORTFÖY KOR SERBEST (DÖVİZ) ÖZEL FON",
    "type": "Serbest Şemsiye Fonu",
-   "risk": 6.0,
+   "risk": null,
    "ret1m": null,
    "ret3m": null,
    "ret6m": null,

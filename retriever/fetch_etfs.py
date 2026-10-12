@@ -37,6 +37,7 @@ import json
 import os
 import random
 import sys
+import math
 import time
 import urllib.error
 import urllib.parse
@@ -200,7 +201,34 @@ def pct(new: float, old: float):
     return round((new / old - 1.0) * 100.0, 4)
 
 
-def summarise(daily: dict, meta: dict) -> dict:
+def detect_break(stamps, closes, factor: float = 10.0):
+    """Find a single-session jump too large to be a price move.
+
+    Several dozen Turkish funds step from ~4.20 to ~0.0022 on one date --
+    a money market fund cannot lose 99.9% in a day, and the same break
+    lands on the same date across unrelated funds, so it is a reporting
+    change at the source (a redenomination or a feed error), not a return.
+
+    The break is reported, never repaired: rescaling by the observed ratio
+    would be inventing a corporate action nobody confirmed. Flagged funds
+    are excluded from theme aggregates and marked in the dashboard.
+    """
+    worst = None
+    for i in range(1, len(closes)):
+        prev, cur = closes[i - 1], closes[i]
+        if prev <= 0 or cur <= 0:
+            continue
+        ratio = cur / prev
+        if ratio < 1 / factor or ratio > factor:
+            if worst is None or abs(math.log(ratio)) > abs(math.log(worst["ratio"])):
+                worst = {
+                    "date": datetime.fromtimestamp(stamps[i], timezone.utc).strftime("%Y-%m-%d"),
+                    "ratio": round(ratio, 8),
+                }
+    return worst
+
+
+def summarise(daily: dict, meta: dict, price_type: str = "market") -> dict:
     """Headline stats for the market list, computed from the daily series."""
     closes, stamps, vols = daily["c"], daily["t"], daily["v"]
     last = closes[-1]
@@ -216,9 +244,22 @@ def summarise(daily: dict, meta: dict) -> dict:
     window = [(ts, cl) for ts, cl in zip(stamps, closes) if ts >= stamps[-1] - 365 * 86400]
     win_closes = [cl for _, cl in window] or closes
 
+    brk = detect_break(stamps, closes)
+
+    # Second failure mode: no single cliff, just a slide to a price no real
+    # fund quotes (BDI runs 0.577 -> 0.000004 over weeks). Only applied to
+    # TEFAS net asset values -- an open-ended fund is wound up long before it
+    # loses 90% of its NAV, whereas a 2x leveraged ETF decaying 95% is doing
+    # exactly what it says on the tin.
+    if brk is None and price_type == "nav":
+        peak = max(closes)
+        if peak > 0 and last / peak < 0.10:
+            brk = {"date": None, "ratio": round(last / peak, 8), "kind": "collapse"}
+
     return {
         "last": round(last, 4),
         "chgPct": pct(last, prev),
+        **({"priceBreak": brk, "suspect": True} if brk else {}),
         "ytdPct": pct(last, ytd_base),
         "high52": round(max(win_closes), 4),
         "low52": round(min(win_closes), 4),
@@ -451,6 +492,59 @@ def encode_spark(values):
     return "".join(SPARK_ALPHA[min(n, max(0, int((v - lo) / rng * n)))] for v in vals)
 
 
+def _median(xs):
+    xs = sorted(x for x in xs if x is not None)
+    if not xs:
+        return None
+    mid = len(xs) // 2
+    return xs[mid] if len(xs) % 2 else round((xs[mid - 1] + xs[mid]) / 2, 4)
+
+
+def write_theme_index(rows, out_dir):
+    """themes.json -- the grouping the dashboard filters by and the unit any
+    cross-fund comparison works in.
+
+    Each entry carries its members and the distribution of their returns, so a
+    theme can be ranked or compared without opening several thousand files.
+    `Unclassified` is deliberately named: it is the residue of the name-based
+    rules, not a strategy, and should be excluded from comparisons.
+    """
+    index: dict[str, dict] = {}
+    for market, items in rows.items():
+        for e in items:
+            key = f"{market}:{e['h']}"
+            t = index.setdefault(key, {
+                "theme": e["h"], "category": e["c"], "market": market,
+                "members": [], "_ytd": [], "_chg": [],
+            })
+            t["members"].append(e["d"])
+            if e.get("x"):
+                t["flagged"] = t.get("flagged", 0) + 1
+                continue          # a reporting break is not a return
+            t["_ytd"].append(e.get("y"))
+            t["_chg"].append(e.get("p"))
+
+    out = []
+    for t in index.values():
+        ytd = [x for x in t.pop("_ytd") if x is not None]
+        chg = [x for x in t.pop("_chg") if x is not None]
+        t["members"].sort()
+        t["count"] = len(t["members"])
+        t["flagged"] = t.get("flagged", 0)
+        t["medianYtdPct"] = _median(ytd)
+        t["medianChgPct"] = _median(chg)
+        t["bestYtdPct"] = round(max(ytd), 4) if ytd else None
+        t["worstYtdPct"] = round(min(ytd), 4) if ytd else None
+        out.append(t)
+    out.sort(key=lambda t: (t["market"], -t["count"]))
+
+    path = os.path.join(out_dir, "themes.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"generatedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                   "themes": out}, fh, separators=(",", ":"), ensure_ascii=False)
+    print(f"-> themes.json: {len(out)} themes ({os.path.getsize(path)/1024:.1f} KB)")
+
+
 def write_manifest(records, out_dir, history_start, skipped):
     markets: dict[str, dict] = {}
     labels = {
@@ -475,10 +569,12 @@ def write_manifest(records, out_dir, history_start, skipped):
             "d": rec["display"],
             "n": rec["name"],
             "c": rec["category"],
+            "h": rec.get("theme") or "Unclassified",
             "l": st.get("last"),
             "p": st.get("chgPct"),
             "y": st.get("ytdPct"),
             "k": encode_spark(st.get("spark")),
+            **({"x": 1} if st.get("suspect") else {}),
         })
 
     for market, items in rows.items():
@@ -487,6 +583,11 @@ def write_manifest(records, out_dir, history_start, skipped):
             **labels[market],
             "count": len(items),
             "categories": sorted({e["c"] for e in items}),
+            "themes": sorted({e["h"] for e in items}),
+            "themesByCategory": {
+                cat: sorted({e["h"] for e in items if e["c"] == cat})
+                for cat in sorted({e["c"] for e in items})
+            },
             "rows": f"market-{market.lower()}.json",
         }
         path = os.path.join(out_dir, f"market-{market.lower()}.json")
@@ -494,6 +595,8 @@ def write_manifest(records, out_dir, history_start, skipped):
             json.dump(items, fh, separators=(",", ":"), ensure_ascii=False)
         print(f"-> {os.path.basename(path)}: {len(items)} funds "
               f"({os.path.getsize(path)/1024:.1f} KB)")
+
+    write_theme_index(rows, out_dir)
 
     manifest = {
         "generatedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),

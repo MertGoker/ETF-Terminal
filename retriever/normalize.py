@@ -24,7 +24,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 from fetch_etfs import YTD_ANCHOR, load_all, summarise, write_manifest  # noqa: E402
-from classify import classify  # noqa: E402
+from classify import classify_theme, classify_tr  # noqa: E402
 from resample import compact, ensure_daily  # noqa: E402
 from universe import category_map  # noqa: E402
 
@@ -37,11 +37,15 @@ def main():
     ap.add_argument("--keep", nargs="+", default=["1d"], help="resolutions to keep")
     ap.add_argument("--recategorise", action="store_true",
                     help="re-derive US categories from fund names")
+    ap.add_argument("--drop-empty", action="store_true",
+                    help="delete funds left with no bars inside --history-start "
+                         "(delisted or dormant; the retriever can refetch them)")
     args = ap.parse_args()
 
     start = int(datetime.strptime(args.history_start, "%Y-%m-%d")
                 .replace(tzinfo=timezone.utc).timestamp())
     keep = set(args.keep)
+    dropped = []
     cats = category_map() if args.recategorise else {}
     changed = 0
 
@@ -72,11 +76,28 @@ def main():
                     i += 1
                 out[k] = compact({kk: vv[i:] for kk, vv in v.items()})
 
-            if args.recategorise and rec.get("market") == "US":
-                rec["category"] = cats.get(rec["symbol"]) or classify(rec.get("name") or "")
+            # A fund whose whole history predates the window has nothing left
+            # to chart. Summarising an empty series raises, and showing it
+            # would be a row that opens to a blank panel.
+            if len(out.get("1d", {}).get("t", [])) < 2:
+                dropped.append(rec.get("display") or fn[:-5])
+                if args.drop_empty:
+                    os.remove(path)
+                continue
+
+            if args.recategorise:
+                name = rec.get("name") or ""
+                if rec.get("market") == "US":
+                    cat, theme = classify_theme(name)
+                    rec["category"] = cats.get(rec["symbol"]) or cat
+                    rec["theme"] = theme
+                else:
+                    cat, theme = classify_tr(name, rec.get("tefasType") or "",
+                                             rec.get("fundClass") == "etf")
+                    rec["category"], rec["theme"] = cat, theme
             rec["series"] = out
             rec["baseIntervals"] = [k for k in ("1h", "1d") if k in out]
-            rec["stats"] = summarise(out["1d"], {})
+            rec["stats"] = summarise(out["1d"], {}, rec.get("priceType") or "market")
             with open(path, "w", encoding="utf-8") as fh:
                 json.dump(rec, fh, separators=(",", ":"), ensure_ascii=False)
             after = os.path.getsize(path)
@@ -87,6 +108,10 @@ def main():
 
     write_manifest(load_all(args.data, {}), args.data, YTD_ANCHOR, [])
     print(f"-> {changed} files rewritten")
+    if dropped:
+        verb = "removed" if args.drop_empty else "left alone (pass --drop-empty)"
+        print(f"-> {len(dropped)} funds have no bars since {args.history_start}: {verb}")
+        print("   " + ", ".join(sorted(dropped)[:15]) + (" ..." if len(dropped) > 15 else ""))
 
 
 if __name__ == "__main__":

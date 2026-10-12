@@ -22,7 +22,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 from fetch_etfs import YTD_ANCHOR, load_all, summarise, write_manifest  # noqa: E402
-from classify import classify  # noqa: E402
+from classify import classify_theme  # noqa: E402
 from resample import compact, ensure_daily  # noqa: E402
 from universe import CATEGORY_FALLBACK, category_map  # noqa: E402
 
@@ -144,8 +144,10 @@ def main():
             "display": display,
             "name": meta.get("longName") or meta.get("shortName") or symbol,
             "market": market,
-            "category": cats.get(symbol) or classify(
-                meta.get("longName") or meta.get("shortName") or ""),
+            "category": cats.get(symbol) or classify_theme(
+                meta.get("longName") or meta.get("shortName") or "")[0],
+            "theme": classify_theme(
+                meta.get("longName") or meta.get("shortName") or "")[1],
             "currency": meta.get("currency") or ("TRY" if market == "TR" else "USD"),
             "exchange": meta.get("fullExchangeName") or meta.get("exchangeName"),
             "timezone": meta.get("exchangeTimezoneName"),
