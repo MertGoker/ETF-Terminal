@@ -8,7 +8,8 @@ same chart payloads from a real browser session and drops one bundle into
 `raw/bundle.json`; this script normalises that bundle into exactly the files
 `fetch_etfs.py` would have written, then rebuilds the manifest.
 
-    python3 build_from_raw.py [raw/bundle.json]
+    python3 build_from_raw.py                 # every raw/*.json capture
+    python3 build_from_raw.py raw/bundle.json # one specific capture
 """
 from __future__ import annotations
 
@@ -20,7 +21,8 @@ from datetime import datetime, timezone
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from fetch_etfs import YTD_ANCHOR, summarise, write_manifest  # noqa: E402
+from fetch_etfs import YTD_ANCHOR, load_all, summarise, write_manifest  # noqa: E402
+from classify import classify  # noqa: E402
 from resample import compact, ensure_daily  # noqa: E402
 from universe import CATEGORY_FALLBACK, category_map  # noqa: E402
 
@@ -32,6 +34,19 @@ ORDER = ["1h", "1d"]
 # payload for bars nobody charts. Daily history is kept in full.
 HOURLY_DAYS = 400
 DAILY_DAYS = None
+HISTORY_START = int(datetime(2021, 1, 1, tzinfo=timezone.utc).timestamp())
+STORE_INTRADAY = False
+
+
+def clip(series: dict) -> dict:
+    """Drop bars before HISTORY_START."""
+    t = series["t"]
+    i = 0
+    while i < len(t) and t[i] < HISTORY_START:
+        i += 1
+    if i == 0:
+        return series
+    return {k: v[i:] for k, v in series.items()}
 
 
 def columnar(entry):
@@ -63,13 +78,33 @@ def columnar(entry):
     return {"t": t, "o": o, "h": h, "l": l, "c": c, "v": v}
 
 
-def main():
-    path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "raw", "bundle.json")
+def load_capture(path):
     blob = open(path, encoding="utf-8").read()
     if blob.startswith("b="):            # text/plain form encoding from pull.html
         blob = blob[2:]
-    entries = json.loads(blob)
-    print(f"-> {len(entries)} captured series from {os.path.basename(path)}")
+    return json.loads(blob)
+
+
+def main():
+    raw_dir = os.path.join(HERE, "raw")
+    if len(sys.argv) > 1:
+        paths = sys.argv[1:]
+    else:
+        paths = sorted(os.path.join(raw_dir, f) for f in os.listdir(raw_dir)
+                       if f.endswith(".json")) if os.path.isdir(raw_dir) else []
+    if not paths:
+        raise SystemExit(f"no captures found in {raw_dir} -- see receiver.py /pull")
+
+    entries = []
+    for path in paths:
+        try:
+            got = load_capture(path)
+        except Exception as exc:
+            print(f"   ! {os.path.basename(path)}: {exc}")
+            continue
+        entries.extend(got)
+        print(f"-> {len(got):>4} series from {os.path.basename(path)}")
+    print(f"-> {len(entries)} captured series total")
 
     cats = category_map()
     grouped: dict[str, dict] = {}
@@ -77,7 +112,10 @@ def main():
         grouped.setdefault(e["sym"], {"meta": {}, "series": {}})
         series = columnar(e)
         if series:
-            grouped[e["sym"]]["series"][e["iv"]] = series
+            prev = grouped[e["sym"]]["series"].get(e["iv"])
+            # a later capture wins only if it actually carries more history
+            if not prev or len(series["t"]) > len(prev["t"]):
+                grouped[e["sym"]]["series"][e["iv"]] = series
         grouped[e["sym"]]["meta"].update(e.get("meta") or {})
 
     os.makedirs(os.path.join(OUT, "us"), exist_ok=True)
@@ -86,6 +124,13 @@ def main():
     records = {}
     for symbol, g in sorted(grouped.items()):
         series, meta = g["series"], g["meta"]
+        # The candidate lists contain informed guesses, and some BIST tickers
+        # that look like fund codes are ordinary listed companies. Trust the
+        # venue's own classification rather than the ticker.
+        itype = (meta.get("instrumentType") or "").upper()
+        if itype and itype != "ETF":
+            print(f"   skip {symbol}: {itype}, not an ETF ({meta.get('longName') or ''})")
+            continue
         # Borsa Istanbul funds come back with an hourly series but only a stub
         # daily one, so aggregate the daily bars ourselves when needed.
         daily_src = ensure_daily(series, meta.get("gmtoffset"))
@@ -99,7 +144,8 @@ def main():
             "display": display,
             "name": meta.get("longName") or meta.get("shortName") or symbol,
             "market": market,
-            "category": cats.get(symbol, CATEGORY_FALLBACK),
+            "category": cats.get(symbol) or classify(
+                meta.get("longName") or meta.get("shortName") or ""),
             "currency": meta.get("currency") or ("TRY" if market == "TR" else "USD"),
             "exchange": meta.get("fullExchangeName") or meta.get("exchangeName"),
             "timezone": meta.get("exchangeTimezoneName"),
@@ -107,9 +153,11 @@ def main():
             "instrumentType": meta.get("instrumentType"),
             "fetchedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "dailySource": daily_src,
-            "baseIntervals": [i for i in ORDER if i in series],
-            "series": {i: compact(series[i], HOURLY_DAYS if i == "1h" else DAILY_DAYS)
-                       for i in ORDER if i in series},
+            "baseIntervals": ["1d"] if not STORE_INTRADAY else [i for i in ORDER if i in series],
+            "series": ({"1d": compact(clip(series["1d"]), DAILY_DAYS)}
+                       if not STORE_INTRADAY else
+                       {i: compact(clip(series[i]), HOURLY_DAYS if i == "1h" else DAILY_DAYS)
+                        for i in ORDER if i in series}),
         }
         rec["stats"] = summarise(series["1d"], meta)
         folder = "us" if market == "US" else "tr"
@@ -123,8 +171,10 @@ def main():
               f"{len(series['1d']['t']):>5}d {len(series.get('1h', {}).get('t', [])):>5}h  "
               f"{kb:7.1f} KB{tag}")
 
-    write_manifest(records, OUT, YTD_ANCHOR, [])
-    print(f"-> {len(records)} ETFs written to {OUT}")
+    # Index everything on disk, not just this capture, so earlier runs survive.
+    everything = load_all(OUT, records)
+    write_manifest(everything, OUT, YTD_ANCHOR, [])
+    print(f"-> {len(records)} ETFs written, {len(everything)} in the manifest")
 
 
 if __name__ == "__main__":

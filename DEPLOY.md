@@ -1,6 +1,6 @@
 # Putting this online
 
-The site is `web/` — static files, no build step, ~2.6 MB. Any free static
+The site is `web/` — static files, no build step, ~17 MB (101 funds). Any free static
 host serves it as-is.
 
 Pick **one** of the routes below. Route A is the easiest if you already use

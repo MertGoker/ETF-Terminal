@@ -5,14 +5,16 @@ ETF price retriever for the US and Turkish (Borsa Istanbul) ETF markets.
 Source: Yahoo Finance's public chart endpoint. No API key, no account, no
 paid tier -- it is the same endpoint the finance.yahoo.com charts call.
 
-The smallest step the dashboard offers is one hour, so only two *base*
-resolutions need to be stored:
+The smallest step the dashboard offers is one day, so only one *base*
+resolution is stored:
 
-    1h   last 730 days              -> feeds 1h, 3h, 4h, 8h
-    1d   from --history-start today -> feeds 1d, 3d, 1w, 2w, 3w, 1M, 3M, 6M, 1Y
+    1d   from --history-start to today -> feeds 1D, 3D, 1W, 2W, 3W, 1M, 3M, 6M, 1Y
 
-Everything coarser is resampled in the browser, so the stored payload stays
-small while all thirteen steps work offline.
+Everything coarser is resampled in the browser. Hourly bars are still
+retrieved for Borsa Istanbul funds, because the feed publishes no daily
+series for them at all and their daily bars have to be aggregated from the
+hourly one -- but the hourly series is dropped before writing, so it never
+reaches the payload.
 
 Output layout (static, host-anywhere):
 
@@ -67,6 +69,10 @@ BASE_SERIES = [
 
 # 2026 year-to-date is what the assignment asks the dashboard to default to.
 YTD_ANCHOR = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+# Set from --store-intraday; the hourly series is dropped from the payload
+# unless this is on.
+STORE_INTRADAY = False
 
 
 # --------------------------------------------------------------------------
@@ -220,8 +226,10 @@ def summarise(daily: dict, meta: dict) -> dict:
         "bars": len(closes),
         "firstDate": datetime.fromtimestamp(stamps[0], timezone.utc).strftime("%Y-%m-%d"),
         "lastDate": datetime.fromtimestamp(stamps[-1], timezone.utc).strftime("%Y-%m-%d"),
-        # small sparkline for the list view: last 60 daily closes
-        "spark": [round(x, 4) for x in closes[-60:]],
+        # Sparkline for the list view. It is drawn 46px wide, so 60 points
+        # were never distinguishable -- and across a few thousand funds the
+        # sparkline was roughly half the manifest. 24 reads the same.
+        "spark": [round(x, 4) for x in closes[-24:]],
         "fiftyTwoWeekHigh": meta.get("fiftyTwoWeekHigh"),
         "fiftyTwoWeekLow": meta.get("fiftyTwoWeekLow"),
     }
@@ -261,6 +269,10 @@ def fetch_symbol(symbol: str, market: str, category: str, history_start: datetim
             series[interval] = parsed
         time.sleep(pause + random.random() * pause)  # be polite
 
+    itype = (meta.get("instrumentType") or "").upper()
+    if itype and itype != "ETF":
+        return symbol, None, f"{itype}, not an ETF"
+
     # Borsa Istanbul funds return an hourly series but only a stub daily one.
     daily_src = ensure_daily(series, meta.get("gmtoffset") if meta else
                              (prior or {}).get("gmtoffset"))
@@ -294,6 +306,11 @@ def fetch_symbol(symbol: str, market: str, category: str, history_start: datetim
                    "exchangeTimezoneName", "gmtoffset", "instrumentType",
                    "fiftyTwoWeekHigh", "fiftyTwoWeekLow") if meta.get(k) is not None},
     }
+    if not STORE_INTRADAY:
+        # Hourly was only ever a means to a daily series for BIST funds.
+        record["series"] = {"1d": series["1d"]}
+        record["baseIntervals"] = ["1d"]
+
     record["stats"] = summarise(series["1d"], meta)
     return symbol, record, None
 
@@ -322,6 +339,10 @@ def build(markets, out_dir, history_start, workers, only, probe_candidates,
           f"| intervals={','.join(intervals)} | daily history from {history_start:%Y-%m-%d} "
           f"| {workers} workers{' | REFRESH' if refresh else ' | resume'}")
 
+    _run(jobs, out_dir, history_start, workers, intervals, refresh, pause)
+
+
+def _run(jobs, out_dir, history_start, workers, intervals, refresh, pause):
     os.makedirs(os.path.join(out_dir, "us"), exist_ok=True)
     os.makedirs(os.path.join(out_dir, "tr"), exist_ok=True)
 
@@ -366,7 +387,8 @@ def build(markets, out_dir, history_start, workers, only, probe_candidates,
 
 def load_all(out_dir, fresh):
     """Union of ETFs just fetched and ETFs already on disk from earlier passes."""
-    merged = dict(fresh)
+    merged = {f"{'us' if r.get('market') == 'US' else 'tr'}:{r.get('display')}": r
+              for r in fresh.values()}
     for folder in ("us", "tr"):
         d = os.path.join(out_dir, folder)
         if not os.path.isdir(d):
@@ -379,8 +401,54 @@ def load_all(out_dir, fresh):
                     rec = json.load(fh)
             except Exception:
                 continue
-            merged.setdefault(rec.get("symbol", fn[:-5]), rec)
+            # key on market + file name: symbols are not globally unique
+            # across venues, and a collision must never drop a fund.
+            key = f"{folder}:{fn[:-5]}"
+            merged.setdefault(key, rec)
     return merged
+
+
+def build_from_universe(path, limit, out_dir, history_start, workers,
+                        intervals, refresh, pause):
+    """Retrieve a universe file produced by us_universe.py or tefas.py.
+
+    This is the route for the full market: `us_universe.py` enumerates every
+    US-listed ETF (~5,700), far more than universe.py's curated shortlist.
+    Everything else -- resume, the non-ETF guard, manifest rebuilding -- works
+    exactly as it does for the curated path.
+    """
+    with open(path, encoding="utf-8") as fh:
+        uni = json.load(fh)
+    items = uni.get("etfs") or uni.get("funds") or []
+    jobs = []
+    for it in items:
+        sym = it.get("symbol") or it.get("ticker")
+        if not sym:
+            continue
+        market = "TR" if sym.endswith(".IS") else "US"
+        jobs.append((sym, market, it.get("category") or CATEGORY_FALLBACK))
+    if limit:
+        jobs = jobs[:limit]
+
+    print(f"-> universe {os.path.basename(path)}: {len(jobs)} symbols "
+          f"| intervals={','.join(intervals)} | {workers} workers")
+    _run(jobs, out_dir, history_start, workers, intervals, refresh, pause)
+
+
+# A 24-point sparkline as JSON floats costs ~170 bytes per fund; across four
+# thousand funds that alone was most of the index. The chart only needs the
+# shape, so each point is quantised to one character.
+SPARK_ALPHA = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+
+def encode_spark(values):
+    vals = [v for v in (values or []) if v is not None]
+    if len(vals) < 2:
+        return ""
+    lo, hi = min(vals), max(vals)
+    rng = (hi - lo) or 1.0
+    n = len(SPARK_ALPHA) - 1
+    return "".join(SPARK_ALPHA[min(n, max(0, int((v - lo) / rng * n)))] for v in vals)
 
 
 def write_manifest(records, out_dir, history_start, skipped):
@@ -390,43 +458,56 @@ def write_manifest(records, out_dir, history_start, skipped):
                "symbol": "$", "venue": "NYSE Arca / Nasdaq / Cboe BZX",
                "tz": "America/New_York"},
         "TR": {"label": "Türkiye", "flag": "TR", "currency": "TRY",
-               "symbol": "₺", "venue": "Borsa İstanbul (BYF Pazarı)",
+               "symbol": "₺", "venue": "Borsa İstanbul BYF + TEFAS",
                "tz": "Europe/Istanbul"},
     }
 
+    # The index is split in two so opening the page downloads only what the
+    # first screen needs: a few kilobytes of market metadata, then the rows
+    # for the one market on display. Every field the instrument panel reads
+    # lives in the per-fund file, so a row here carries only what the list
+    # itself draws -- short keys, and the sparkline as a quantised string.
+    rows: dict[str, list] = {}
     for rec in records.values():
-        bucket = markets.setdefault(rec["market"], {**labels[rec["market"]], "etfs": []})
-        bucket["etfs"].append({
-            "symbol": rec["symbol"],
-            "display": rec["display"],
-            "name": rec["name"],
-            "category": rec["category"],
-            "currency": rec["currency"],
-            "exchange": rec["exchange"],
-            "timezone": rec["timezone"],
-            "file": ("us/" if rec["market"] == "US" else "tr/") + rec["display"] + ".json",
-            "baseIntervals": rec["baseIntervals"],
-            **rec["stats"],
+        st = rec["stats"]
+        rows.setdefault(rec["market"], []).append({
+            "s": rec["symbol"],
+            "d": rec["display"],
+            "n": rec["name"],
+            "c": rec["category"],
+            "l": st.get("last"),
+            "p": st.get("chgPct"),
+            "y": st.get("ytdPct"),
+            "k": encode_spark(st.get("spark")),
         })
 
-    for bucket in markets.values():
-        bucket["etfs"].sort(key=lambda e: e["display"])
-        bucket["count"] = len(bucket["etfs"])
-        bucket["categories"] = sorted({e["category"] for e in bucket["etfs"]})
+    for market, items in rows.items():
+        items.sort(key=lambda e: e["d"])
+        markets[market] = {
+            **labels[market],
+            "count": len(items),
+            "categories": sorted({e["c"] for e in items}),
+            "rows": f"market-{market.lower()}.json",
+        }
+        path = os.path.join(out_dir, f"market-{market.lower()}.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(items, fh, separators=(",", ":"), ensure_ascii=False)
+        print(f"-> {os.path.basename(path)}: {len(items)} funds "
+              f"({os.path.getsize(path)/1024:.1f} KB)")
 
     manifest = {
         "generatedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "source": "Yahoo Finance public chart endpoint (keyless)",
+        "source": "Yahoo Finance (US) and TEFAS (Türkiye), both keyless",
         "historyStart": history_start.strftime("%Y-%m-%d"),
         "defaultRangeStart": YTD_ANCHOR.strftime("%Y-%m-%d"),
-        "baseIntervals": [i for i, _ in BASE_SERIES],
+        "sparkAlphabet": SPARK_ALPHA,
         "markets": markets,
         "skipped": [{"symbol": s, "reason": r} for s, r in sorted(skipped)],
     }
     path = os.path.join(out_dir, "manifest.json")
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, separators=(",", ":"), ensure_ascii=False)
-    print(f"-> manifest: {path} ({os.path.getsize(path)/1024:.1f} KB)")
+    print(f"-> manifest: {os.path.getsize(path)/1024:.1f} KB (index only)")
 
 
 def main():
@@ -436,9 +517,11 @@ def main():
     ap.add_argument("--markets", nargs="+", default=["US", "TR"],
                     choices=["US", "TR"], help="markets to retrieve")
     ap.add_argument("--out", default=default_out, help="output data directory")
-    ap.add_argument("--history-start", default="2020-01-01",
-                    help="first date for the daily series (default 2020-01-01 so the "
-                         "6M/1Y steps have real buckets; the dashboard still opens on 2026-01-01)")
+    ap.add_argument("--history-start", default="2021-01-01",
+                    help="first date for the daily series (default 2021-01-01)")
+    ap.add_argument("--store-intraday", action="store_true",
+                    help="also keep the hourly series in the output (off by default: "
+                         "the dashboard's smallest step is one day)")
     ap.add_argument("--workers", type=int, default=5)
     ap.add_argument("--only", nargs="*", default=None, help="restrict to these tickers")
     ap.add_argument("--probe-candidates", action="store_true",
@@ -453,11 +536,22 @@ def main():
                     help="base delay between requests, seconds (raise if throttled)")
     ap.add_argument("--rebuild-manifest", action="store_true",
                     help="only regenerate manifest.json from the files already on disk")
+    ap.add_argument("--universe", default=None,
+                    help="JSON file from us_universe.py / tefas.py to retrieve instead of "
+                         "the hand-curated lists in universe.py")
+    ap.add_argument("--limit", type=int, default=None,
+                    help="cap how many symbols from --universe to retrieve")
     args = ap.parse_args()
 
+    global STORE_INTRADAY
+    STORE_INTRADAY = args.store_intraday
     start = datetime.strptime(args.history_start, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     if args.rebuild_manifest:
         write_manifest(load_all(args.out, {}), args.out, start, [])
+        return
+    if args.universe:
+        build_from_universe(args.universe, args.limit, args.out, start, args.workers,
+                            args.intervals, args.refresh, args.pause)
         return
     build(set(args.markets), args.out, start, args.workers, args.only,
           args.probe_candidates, args.intervals, args.refresh, args.pause)

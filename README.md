@@ -1,6 +1,7 @@
 # Bourse ETF Terminal
 
-Price history for the **United States** and **Borsa İstanbul** ETF markets — a
+Price history for **2,093 exchange-traded funds** across the **United States**
+(2,057) and **Borsa İstanbul** (36) — a
 TradingView-style chart, thirteen time steps from one hour to one year, and
 one-click Excel export of whatever window you are looking at.
 
@@ -106,8 +107,9 @@ python3 retriever/fetch_etfs.py --rebuild-manifest   # re-index web/data/ withou
 
 `manifest.json` is the index the dashboard loads first: both markets, every
 fund's last price, daily change, YTD change, 52-week range, average volume and
-a 60-point sparkline. The per-fund JSON files are only fetched when you click
-a fund.
+a 60-point sparkline. It is 1.6 MB raw but 430 KB gzipped, and the per-fund JSON
+files are only fetched when you click a fund. The list renders the top 250 rows of
+the current sort rather than all two thousand, and says so in its footer.
 
 ### Step 3 — serve and use
 
@@ -187,9 +189,16 @@ not throttled because it carries ordinary session cookies:
 python3 retriever/receiver.py            # local drop box on 127.0.0.1:8787
 ```
 
-1. Open **<http://127.0.0.1:8787/pull>** in a browser and let it run — it
-   fetches each fund and posts the raw payload back to the drop box.
-2. Convert the capture into the normal data files:
+1. Open **<http://127.0.0.1:8787/pull>**. It lists how many funds are still
+   missing and hands you a snippet.
+2. Follow its instructions: open the Yahoo chart URL it links to, open the
+   browser console there, paste the snippet and press Enter.
+
+   The snippet has to run **on Yahoo's origin**, not on this page — the chart
+   endpoint sends no CORS headers, so a collector served from `127.0.0.1`
+   cannot fetch it. The snippet only reads public price data and posts the
+   result back to your own drop box.
+3. Convert the capture into the normal data files:
 
 ```bash
 python3 retriever/build_from_raw.py
@@ -337,6 +346,9 @@ vercel.json            static config — output directory web/
 - Prices are **unadjusted last-traded values** — no dividend or split
   adjustment is applied. Use them for study and coursework, not for
   performance attribution.
-- The dataset ships with 17 funds (9 US, 8 Turkish). `run_all.sh` retrieves the
-  full universe defined in `universe.py`.
+- The dataset ships with **2,093 funds — 2,057 US and 36 Borsa İstanbul**. The US
+  side is the Nasdaq symbol directory via `us_universe.py`; the Turkish side is the
+  complete TEFAS BYF registry. Tickers the venue does not classify as an
+  ETF are rejected by the retriever, so guessed BIST codes that turn out to be
+  ordinary listed companies never reach the dashboard.
 - Nothing in this repository is investment advice.

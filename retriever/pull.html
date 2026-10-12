@@ -1,35 +1,82 @@
 <!doctype html><meta charset="utf-8"><title>Retriever bridge</title>
-<style>body{font:13px ui-monospace,monospace;background:#0b0f14;color:#e4edf4;padding:18px;line-height:1.6}
-b{color:#d9a24b}.ok{color:#36b07f}.bad{color:#e0604d}#log{white-space:pre-wrap}</style>
-<h3>Retriever bridge <b id="st">starting…</b></h3><div id="log"></div>
+<style>
+ body{font:14px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;background:#0b0f14;color:#e4edf4;
+      margin:0;padding:26px 22px;max-width:900px}
+ h2{font-size:17px;margin:0 0 4px} p{color:#8698aa;margin:0 0 14px}
+ b{color:#d9a24b} ol{padding-left:20px;color:#e4edf4} li{margin:9px 0}
+ a{color:#d9a24b} code{background:#161f29;padding:1px 5px;border-radius:3px;color:#e4edf4}
+ textarea{width:100%;height:190px;background:#0f1620;color:#8fe3c0;border:1px solid #2b3a49;
+          border-radius:4px;padding:11px;font:12px/1.5 ui-monospace,monospace;resize:vertical}
+ button{background:#d9a24b;color:#2a1e08;border:0;border-radius:4px;padding:9px 15px;
+        font:600 13px ui-monospace,monospace;cursor:pointer;margin-top:9px}
+ .n{background:#1a1410;border-left:2px solid #d9a24b;padding:10px 13px;margin:16px 0;color:#c7b393}
+</style>
+<h2>Retriever bridge</h2>
+<p>For when Yahoo returns <b>429</b> to every server-side request.</p>
+
+<div class="n">Yahoo's chart endpoint sends no CORS headers, so this page cannot fetch it
+for you — the collector has to run <b>on Yahoo's own origin</b>. That is what the snippet
+below is for. It only reads public price data and posts it back to this local drop box;
+it sends nothing anywhere else.</div>
+
+<ol>
+  <li>Open <a id="seed" target="_blank" rel="noopener">this Yahoo chart URL</a> in a new tab.</li>
+  <li>Open the browser console there — <code>⌥⌘J</code> on macOS, <code>Ctrl+Shift+J</code> on Windows.
+      If it asks you to type <code>allow pasting</code> first, do that.</li>
+  <li>Paste the snippet below, press Enter, and wait. Progress prints in the console.</li>
+  <li>When it finishes, the tab navigates here and shows a confirmation.</li>
+  <li>Back in the terminal: <code>python3 retriever/build_from_raw.py</code></li>
+</ol>
+
+<textarea id="code" readonly spellcheck="false"></textarea>
+<button id="copy">Copy snippet</button>
+<span id="msg" style="margin-left:10px;color:#36b07f"></span>
+
 <script>
-const SY = ["SPY","QQQ","IWM","XLK","SMH","GLD","TLT","ARKK","TUR",
-            "ZPX30.IS","ISX30.IS","GLDTR.IS","APGLD.IS","ZPLIB.IS","ZTM25.IS","ISGLK.IS","Z30KE.IS"];
-const P1 = Math.floor(Date.UTC(2020,0,1)/1000), P2 = Math.floor(Date.now()/1000);
-const log = (m,c) => { const d=document.createElement('div'); d.className=c||''; d.textContent=m;
-                       document.getElementById('log').appendChild(d); };
-const sleep = ms => new Promise(r=>setTimeout(r,ms));
-let ok=0, bad=0;
-(async () => {
-  const jobs=[];
-  for (const s of SY) { jobs.push([s,'1h',`interval=1h&range=730d`]);
-                        jobs.push([s,'1d',`interval=1d&period1=${P1}&period2=${P2}`]); }
-  for (const [sym,iv,qs] of jobs) {
-    let txt=null, status=0;
-    try {
-      const r = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?${qs}`);
-      status = r.status; txt = await r.text();
-    } catch(e) { log(`FETCH ${sym} ${iv} -> ${e}`,'bad'); bad++; await sleep(350); continue; }
-    if (status!==200) { log(`HTTP ${status} ${sym} ${iv}`,'bad'); bad++; await sleep(600); continue; }
-    let n=0;
-    try { const j=JSON.parse(txt); n=((j.chart.result||[])[0]||{}).timestamp?.length||0; } catch(e){}
-    if (!n) { log(`EMPTY ${sym} ${iv}`,'bad'); bad++; await sleep(350); continue; }
-    await fetch(`/save?name=${encodeURIComponent(sym.replace('.IS','')+'__'+iv)}`,
-                {method:'POST',headers:{'Content-Type':'text/plain'},body:txt});
-    log(`ok ${sym.padEnd(10)} ${iv.padEnd(3)} ${n} bars`,'ok'); ok++;
-    document.getElementById('st').textContent = `${ok} saved / ${bad} failed`;
-    await sleep(320);
+document.getElementById('seed').href =
+  'https://query1.finance.yahoo.com/v8/finance/chart/SPY?interval=1d&range=5d';
+
+fetch('/symbols').then(r => r.json()).then(d => {
+  const snippet =
+`(async () => {
+  const SY = ${JSON.stringify(d.symbols)};
+  const P1 = Math.floor(Date.UTC(${d.historyStartYear},0,1)/1000), P2 = Math.floor(Date.now()/1000);
+  const MK = ["currency","symbol","exchangeName","fullExchangeName","instrumentType","longName",
+              "shortName","exchangeTimezoneName","gmtoffset","fiftyTwoWeekHigh","fiftyTwoWeekLow"];
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const bundle = [], bad = [];
+  for (const sym of SY) {
+    for (const [iv, qs] of [["1h","interval=1h&range=730d"],
+                            ["1d",\`interval=1d&period1=\${P1}&period2=\${P2}\`]]) {
+      try {
+        const r = await fetch(\`/v8/finance/chart/\${encodeURIComponent(sym)}?\${qs}\`);
+        if (r.status !== 200) { bad.push(sym+"/"+iv+":"+r.status); await sleep(500); continue; }
+        const j = await r.json();
+        const res = ((j.chart||{}).result||[])[0];
+        if (!res || !res.timestamp) { await sleep(200); continue; }
+        const q = ((res.indicators||{}).quote||[{}])[0];
+        const meta = {}; for (const k of MK) if (res.meta && res.meta[k] != null) meta[k] = res.meta[k];
+        bundle.push({sym, iv, meta, t: res.timestamp,
+                     o: q.open||[], h: q.high||[], l: q.low||[], c: q.close||[], v: q.volume||[]});
+      } catch (e) { bad.push(sym+"/"+iv); }
+      await sleep(170);
+    }
+    console.log(\`\${bundle.length} series | \${SY.indexOf(sym)+1}/\${SY.length} funds\`);
   }
-  document.getElementById('st').textContent = `DONE — ${ok} saved / ${bad} failed`;
-})();
+  console.log("done:", bundle.length, "series,", bad.length, "failed", bad);
+  const f = document.createElement('form');
+  f.method = 'POST'; f.action = '${location.origin}/save?name=bundle'; f.enctype = 'text/plain';
+  const ta = document.createElement('textarea'); ta.name = 'b'; ta.value = JSON.stringify(bundle);
+  f.appendChild(ta); document.body.appendChild(f); f.submit();
+})();`;
+  document.getElementById('code').value = snippet;
+  document.getElementById('msg').textContent = d.symbols.length + ' funds still missing';
+});
+
+document.getElementById('copy').onclick = async () => {
+  const ta = document.getElementById('code');
+  ta.select();
+  try { await navigator.clipboard.writeText(ta.value); } catch (e) { document.execCommand('copy'); }
+  document.getElementById('msg').textContent = 'copied';
+};
 </script>

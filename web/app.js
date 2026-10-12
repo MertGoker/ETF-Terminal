@@ -1,10 +1,10 @@
 /* =====================================================================
    Bourse ETF Terminal
    ---------------------------------------------------------------------
-   Static front end over the JSON the Python retriever writes. Two base
-   resolutions ship with the data (1h and 1d); every coarser step is
-   resampled here, in the browser, so the whole terminal runs with no
-   server and no API key.
+   Static front end over the JSON the Python retriever writes. One base
+   resolution ships with the data (1d); every coarser step is resampled
+   here, in the browser, so the whole terminal runs with no server and
+   no API key.
    ===================================================================== */
 'use strict';
 
@@ -15,12 +15,8 @@ const LWC = window.LightweightCharts;
 /* `base` is the stored resolution a step is built from; `mode`/`n` is the
    bucketing rule applied to it. Bucket boundaries are computed in
    exchange-local time so a "1D" bar is a real trading day in Istanbul or
-   New York, not a UTC day. */
+   New York, not a UTC day. One day is the smallest step. */
 const TF = [
-  { id: '1h', label: '1h', base: '1h', mode: 'none' },
-  { id: '3h', label: '3h', base: '1h', mode: 'sec', n: 3 * 3600 },
-  { id: '4h', label: '4h', base: '1h', mode: 'sec', n: 4 * 3600 },
-  { id: '8h', label: '8h', base: '1h', mode: 'sec', n: 8 * 3600 },
   { id: '1d', label: '1D', base: '1d', mode: 'none' },
   { id: '3d', label: '3D', base: '1d', mode: 'day', n: 3 },
   { id: '1w', label: '1W', base: '1d', mode: 'week', n: 1 },
@@ -32,7 +28,7 @@ const TF = [
   { id: '1Y', label: '1Y', base: '1d', mode: 'month', n: 12 },
 ];
 const TF_BY_ID = Object.fromEntries(TF.map(t => [t.id, t]));
-const INTRADAY = new Set(['1h', '3h', '4h', '8h']);
+const INTRADAY = new Set();   // no sub-daily step is offered
 
 /* ----------------------------------------------------------------- ranges */
 const RANGES = [
@@ -47,6 +43,36 @@ const RANGES = [
   { id: 'custom', label: 'Custom', custom: true },
 ];
 const YTD_START = Date.UTC(2026, 0, 1) / 1000;
+
+/* The universe runs to a couple of thousand funds. Every row carries an
+   inline sparkline, so rendering all of them costs more than it is worth:
+   nobody scrolls two thousand rows, they search. Render the top slice of
+   the current sort and say so. */
+const LIST_RENDER_CAP = 250;
+
+/* Opening on the alphabetically first of two thousand funds lands you on
+   something nobody has heard of. Prefer a bellwether when the market has
+   one. */
+const OPENING_PICK = { US: ['SPY', 'QQQ', 'VOO'], TR: ['ZTM', 'ZPX30', 'ZBB'] };
+function openingFund(market) {
+  const rows = S.rows[market] || [];
+  for (const want of OPENING_PICK[market] || []) {
+    const hit = rows.find(e => e.d === want);
+    if (hit) return hit;
+  }
+  return rows[0];
+}
+
+/* Sparklines arrive as one character per point (see encode_spark in
+   fetch_etfs.py). The chart normalises anyway, so the decoded ordinals are
+   usable as-is. */
+let SPARK_ALPHA = '';
+function decodeSpark(str) {
+  if (!str) return null;
+  const out = new Array(str.length);
+  for (let i = 0; i < str.length; i++) out[i] = SPARK_ALPHA.indexOf(str[i]);
+  return out;
+}
 
 const STYLES = [
   { id: 'candles', label: 'Candles' },
@@ -64,6 +90,7 @@ const SESSIONS = {
 /* ------------------------------------------------------------------ state */
 const S = {
   manifest: null,
+  rows: {},             // market -> fund rows, fetched the first time it is shown
   market: 'US',
   symbol: null,
   etf: null,            // loaded record for S.symbol
@@ -241,7 +268,7 @@ function buildChart() {
   const T = chartTheme();
   CH.chart = LWC.createChart(el, {
     layout: { background: { type: 'solid', color: 'transparent' }, textColor: T.text,
-              fontFamily: '"IBM Plex Mono", ui-monospace, monospace', fontSize: 11 },
+              fontFamily: '"Playfair Display", Georgia, serif', fontSize: 12 },
     grid: { vertLines: { color: T.grid }, horzLines: { color: T.grid } },
     rightPriceScale: { borderColor: T.line, scaleMargins: { top: 0.08, bottom: 0.26 } },
     timeScale: { borderColor: T.line, rightOffset: 4, barSpacing: 8,
@@ -304,7 +331,7 @@ function drawSeries(keepView) {
   clearSeries();
   if (!bars.length) return;
 
-  if (S.overlays.vol) {
+  if (S.overlays.vol && !isNav(S.etf)) {
     CH.volume = CH.chart.addHistogramSeries({
       priceScaleId: 'vol', priceFormat: { type: 'volume' }, priceLineVisible: false,
       lastValueVisible: false,
@@ -452,7 +479,12 @@ function summaryRows(a) {
     ['Total volume', a ? a.vol : null],
     [],
     ['Base resolution stored', tf.base],
-    ['Daily series origin', etf.dailySource === '1h'
+    ['Price basis', etf.priceType === 'nav'
+      ? 'daily net asset value published by TEFAS (no intraday range, no volume)'
+      : 'last traded price'],
+    ['Daily series origin', etf.dailySource === 'tefas'
+      ? `TEFAS fund ${etf.tefasCode}`
+      : etf.dailySource === '1h'
       ? 'aggregated from hourly bars (the venue publishes no daily series through this feed)'
       : 'as published by the feed'],
     ['Resampling', tf.mode === 'none'
@@ -600,7 +632,7 @@ function shellHTML() {
   <footer class="foot">
     <strong>Bourse ETF Terminal</strong> — price history for the United States and Borsa İstanbul ETF markets.
     Prices retrieved with <code>retriever/fetch_etfs.py</code> from Yahoo Finance's public chart endpoint (no API key, no account).
-    Two resolutions are stored per fund — <code>1h</code> and <code>1d</code> — and every coarser step is resampled in the browser
+    One resolution is stored per fund — <code>1d</code> — and every coarser step is resampled in the browser
     (open = first, high = max, low = min, close = last, volume = sum), bucketed in exchange-local time.
     Figures are unadjusted last-traded prices for study and coursework, not investment advice.
   </footer>`;
@@ -614,6 +646,7 @@ function wsHTML() {
         <span class="ticker" id="iTicker">—</span>
         <span class="chip chip-mkt" id="iMkt">—</span>
         <span class="chip" id="iCat">—</span>
+        <span class="chip" id="iClass" hidden></span>
       </div>
       <div class="ident-nm" id="iName">—</div>
       <div class="ident-meta" id="iMeta"></div>
@@ -637,7 +670,7 @@ function wsHTML() {
       </div>
     </div>
     <div class="ctl-grp">
-      <span class="eyebrow">Time step <span style="color:var(--text-2)">· 1h minimum</span></span>
+      <span class="eyebrow">Time step <span style="color:var(--text-2)">· 1 day minimum</span></span>
       <div class="segs" id="segTf"></div>
     </div>
     <div class="ctl-grp">
@@ -712,13 +745,16 @@ function renderTabs() {
       <span class="mtab-label">${mk ? `${mk.count} funds · ${mk.venue}` : 'no data'}</span>
     </button>`;
   }).join('');
-  el.querySelectorAll('.mtab').forEach(b => b.onclick = () => {
-    if (!S.manifest.markets[b.dataset.market]) return;
-    S.market = b.dataset.market; S.category = ''; S.filter = '';
-    const s = document.getElementById('search'); if (s) s.value = '';
-    const first = visibleEtfs()[0];
-    renderTabs(); renderCats(); renderList();
-    if (first) select(first.symbol);
+  el.querySelectorAll('.mtab').forEach(b => b.onclick = async () => {
+    const m = b.dataset.market;
+    if (!S.manifest.markets[m] || m === S.market) return;
+    S.market = m; S.category = ''; S.filter = '';
+    const box = document.getElementById('search'); if (box) box.value = '';
+    renderTabs(); renderCats();
+    await ensureRows(m);
+    renderList();
+    const opening = openingFund(m);
+    if (opening) select(opening.s);
   });
 }
 
@@ -731,20 +767,32 @@ function renderCats() {
 }
 
 /* -------------------------------------------------------------- instrument list */
+const SORT_FIELD = { display: 'd', last: 'l', chgPct: 'p' };
+
 function visibleEtfs() {
-  const mk = S.manifest.markets[S.market];
-  if (!mk) return [];
+  const rows = S.rows[S.market];
+  if (!rows) return [];
   const q = S.filter.trim().toLowerCase();
-  let list = mk.etfs.filter(e =>
-    (!S.category || e.category === S.category) &&
-    (!q || e.display.toLowerCase().includes(q) || (e.name || '').toLowerCase().includes(q)));
-  const { key, dir } = S.sort;
-  list = list.slice().sort((a, b) => {
+  const list = rows.filter(e =>
+    (!S.category || e.c === S.category) &&
+    (!q || e.d.toLowerCase().includes(q) || (e.n || '').toLowerCase().includes(q)));
+  const key = SORT_FIELD[S.sort.key] || 'd';
+  const dir = S.sort.dir;
+  list.sort((a, b) => {
     const av = a[key], bv = b[key];
     if (typeof av === 'string') return av.localeCompare(bv) * dir;
     return ((av ?? -Infinity) - (bv ?? -Infinity)) * dir;
   });
   return list;
+}
+
+async function ensureRows(market) {
+  if (S.rows[market]) return S.rows[market];
+  const mk = S.manifest.markets[market];
+  const res = await fetch(DATA + mk.rows, { cache: 'default' });
+  if (!res.ok) throw new Error(`${mk.rows}: HTTP ${res.status}`);
+  S.rows[market] = await res.json();
+  return S.rows[market];
 }
 
 function sparkline(vals, up) {
@@ -764,25 +812,37 @@ function sparkline(vals, up) {
   </svg>`;
 }
 
+function rowHTML(e) {
+  const s = sign(e.p);
+  const d = decimals(e.l);
+  const on = e.s === S.symbol;
+  return `<button class="row" role="option" data-sym="${e.s}"
+            aria-current="${on}" aria-selected="${on}">
+    <span class="row-id">
+      <span class="row-tic">${e.d}</span>
+      <span class="row-nm">${e.n || ''}</span>
+    </span>
+    <span class="row-last">${nf(e.l, d)}</span>
+    <span class="row-chg" data-s="${s === 'up' ? 'u' : s === 'down' ? 'd' : ''}">${pf(e.p)}</span>
+    ${sparkline(decodeSpark(e.k), (e.y ?? e.p ?? 0) >= 0)}
+  </button>`;
+}
+
 function renderList() {
   const el = document.getElementById('list');
-  const rows = visibleEtfs();
-  el.innerHTML = rows.length ? rows.map(e => {
-    const s = sign(e.chgPct);
-    const d = decimals(e.last);
-    return `<button class="row" role="option" data-sym="${e.symbol}"
-              aria-current="${e.symbol === S.symbol}" aria-selected="${e.symbol === S.symbol}">
-      <span class="row-id">
-        <span class="row-tic">${e.display}</span>
-        <span class="row-nm">${e.name || ''}</span>
-      </span>
-      <span class="row-last">${nf(e.last, d)}</span>
-      <span class="row-chg" data-s="${s === 'up' ? 'u' : s === 'down' ? 'd' : ''}">${pf(e.chgPct)}</span>
-      ${sparkline(e.spark, (e.ytdPct ?? e.chgPct ?? 0) >= 0)}
-    </button>`;
-  }).join('') : `<div style="padding:26px 12px;text-align:center;color:var(--text-3);font-size:12px">No funds match that filter.</div>`;
+  const all = visibleEtfs();
+  const rows = all.slice(0, LIST_RENDER_CAP);
+  el.innerHTML = rows.length ? rows.map(rowHTML).join('') : `<div style="padding:26px 12px;text-align:center;color:var(--text-3);font-size:12px">No funds match that filter.</div>`;
 
   el.querySelectorAll('.row').forEach(b => b.onclick = () => select(b.dataset.sym));
+  if (S.symbol && !rows.some(e => e.s === S.symbol)) {
+    const cur = all.find(e => e.s === S.symbol);
+    if (cur) el.insertAdjacentHTML('afterbegin', rowHTML(cur));
+    const first = el.querySelector('.row');
+    if (first && first.dataset.sym === S.symbol) {
+      first.onclick = () => select(S.symbol);
+    }
+  }
 
   document.querySelectorAll('.lhead [data-sort]').forEach(b => {
     const on = b.dataset.sort === S.sort.key;
@@ -790,13 +850,24 @@ function renderList() {
     else b.removeAttribute('aria-sort');
   });
 
-  const mk = S.manifest.markets[S.market];
+  const mk = S.manifest.markets[S.market] || {};
+  const shown = all.length > rows.length
+    ? `showing ${rows.length} of ${all.length} matches — search to narrow`
+    : `${all.length} of ${mk.count} funds`;
   document.getElementById('listFoot').innerHTML = mk
-    ? `${rows.length} of ${mk.count} funds · quoted in ${mk.currency} (${mk.symbol}) · ${mk.venue}`
+    ? `${shown} · quoted in ${mk.currency} (${mk.symbol}) · ${mk.venue}`
     : '';
 }
 
 /* ------------------------------------------------------------- controls */
+/* TEFAS publishes one NAV per day: no open/high/low and no volume. At the
+   daily step a candle would be a flat doji, so only line and area are
+   offered there. At coarser steps the open/high/low are a genuine
+   aggregation of the daily closes in the bucket, so candles are allowed and
+   the note below says what they are built from. */
+function isNav(etf) { return etf && etf.priceType === 'nav'; }
+function navFlatAtStep() { return isNav(S.etf) && S.tf === '1d'; }
+
 function renderControls() {
   const etf = S.etf;
   const segR = document.getElementById('segRange');
@@ -816,23 +887,31 @@ function renderControls() {
   const segT = document.getElementById('segTf');
   segT.innerHTML = TF.map((t, i) => {
     const have = !!(etf && etf.series[t.base]);
-    const div = (i === 4) ? '<span class="seg-div" aria-hidden="true"></span>' : '';
+    const div = (i === 2 || i === 5) ? '<span class="seg-div" aria-hidden="true"></span>' : '';
     return `${div}<button class="seg" data-tf="${t.id}" aria-pressed="${S.tf === t.id}"
       ${have ? '' : 'disabled title="base resolution not stored for this fund"'}>${t.label}</button>`;
   }).join('');
   segT.querySelectorAll('.seg').forEach(b => b.onclick = () => {
-    S.tf = b.dataset.tf; renderControls(); recompute();
+    S.tf = b.dataset.tf;
+    if (navFlatAtStep() && ['candles', 'hollow', 'bars'].includes(S.style)) S.style = 'area';
+    renderControls(); recompute();
   });
 
   const segS = document.getElementById('segStyle');
-  segS.innerHTML = STYLES.map(s =>
-    `<button class="seg" data-st="${s.id}" aria-pressed="${S.style === s.id}">${s.label}</button>`).join('');
+  const flat = navFlatAtStep();
+  const ohlcStyle = new Set(['candles', 'hollow', 'bars']);
+  segS.innerHTML = STYLES.map(s => {
+    const off = flat && ohlcStyle.has(s.id);
+    return `<button class="seg" data-st="${s.id}" aria-pressed="${S.style === s.id}"
+      ${off ? 'disabled title="this fund reports one net asset value per day, so a daily bar has no high or low"' : ''}>${s.label}</button>`;
+  }).join('');
   segS.querySelectorAll('.seg').forEach(b => b.onclick = () => {
     S.style = b.dataset.st; renderControls(); drawSeries(true);
   });
 
   const segO = document.getElementById('segOv');
-  const ovs = [['vol', 'Volume'], ['sma20', 'SMA 20'], ['sma50', 'SMA 50']];
+  const ovs = isNav(etf) ? [['sma20', 'SMA 20'], ['sma50', 'SMA 50']]
+                         : [['vol', 'Volume'], ['sma20', 'SMA 20'], ['sma50', 'SMA 50']];
   segO.innerHTML = ovs.map(([k, l]) =>
     `<button class="seg" data-ov="${k}" aria-pressed="${S.overlays[k]}">${l}</button>`).join('') +
     `<span class="seg-div" aria-hidden="true"></span><button class="seg" data-fit="1" title="Reset zoom">Fit</button>`;
@@ -851,11 +930,23 @@ function renderInstrument() {
   mk.textContent = e.market === 'US' ? 'United States' : 'Türkiye';
   mk.dataset.m = e.market;
   document.getElementById('iCat').textContent = e.category;
+  // An exchange-traded fund and an open-ended mutual fund behave very
+  // differently; the header says which one you are looking at.
+  const cls = document.getElementById('iClass');
+  if (cls) {
+    const mutual = e.fundClass === 'mutual';
+    cls.hidden = !e.fundClass;
+    cls.textContent = mutual ? 'Mutual fund' : 'Exchange-traded';
+    cls.style.borderColor = mutual ? 'var(--line-2)' : 'var(--accent)';
+    cls.style.color = mutual ? 'var(--text-3)' : 'var(--accent)';
+  }
   document.getElementById('iName').textContent = e.name;
   document.getElementById('iMeta').innerHTML =
     [e.exchange, e.symbol, e.timezone,
      `${e.stats.bars} daily bars from ${e.stats.firstDate}`,
-     e.dailySource === '1h' ? 'daily bars aggregated from hourly' : null]
+     e.dailySource === '1h' ? 'daily bars aggregated from hourly' : null,
+     e.dailySource === 'tefas' ? `TEFAS ${e.tefasCode} · daily net asset value` : null,
+     e.riskValue ? `risk ${e.riskValue}/7` : null]
       .filter(Boolean).map(x => `<span>${x}</span>`).join('');
 
   document.getElementById('qCur').textContent = S.manifest.markets[e.market].symbol;
@@ -920,13 +1011,17 @@ function renderNote(from) {
     el.textContent = `No ${tf.base} data stored for ${S.etf.display}. Re-run the retriever with --intervals ${tf.base}.`;
     return;
   }
+  if (isNav(S.etf) && TF_BY_ID[S.tf].mode !== 'none') {
+    el.hidden = false;
+    el.textContent = `${S.etf.display} reports one net asset value per day, so each ${tf.label} bar's open, high and low are taken from the daily closes inside it, not from intraday trading.`;
+    return;
+  }
   const covers = base.t[0];
   if (from != null && covers > from + 86400) {
     const gmt = S.etf.gmtoffset || 0;
     el.hidden = false;
-    el.textContent = tf.base === '1h'
-      ? `Hourly bars are stored from ${fmtLocal(covers + gmt, false)} onward, so the ${tf.label} step starts there rather than at the period start. Switch to a 1D or coarser step to chart the full period.`
-      : `Stored history for ${S.etf.display} begins ${fmtLocal(covers + gmt, false)}; the chart starts there.`;
+    el.textContent =
+      `Stored history for ${S.etf.display} begins ${fmtLocal(covers + gmt, false)}, so the chart starts there rather than at the period start.`;
     return;
   }
   el.hidden = true;
@@ -946,13 +1041,17 @@ function recompute() {
   if (m) { m.textContent = ''; m.dataset.s = ''; }
 }
 
+function fileFor(market, symbol) {
+  const row = (S.rows[market] || []).find(e => e.s === symbol);
+  const display = row ? row.d : symbol.replace('.TEFAS', '');
+  return `${market.toLowerCase()}/${display}.json`;
+}
+
 async function loadEtf(symbol) {
   if (S.cache.has(symbol)) return S.cache.get(symbol);
-  const mk = S.manifest.markets[S.market];
-  const meta = (mk.etfs.find(e => e.symbol === symbol)) ||
-    Object.values(S.manifest.markets).flatMap(m => m.etfs).find(e => e.symbol === symbol);
-  const res = await fetch(DATA + meta.file, { cache: 'default' });
-  if (!res.ok) throw new Error(`${meta.file}: HTTP ${res.status}`);
+  const file = fileFor(S.market, symbol);
+  const res = await fetch(DATA + file, { cache: 'default' });
+  if (!res.ok) throw new Error(`${file}: HTTP ${res.status}`);
   const rec = await res.json();
   S.cache.set(symbol, rec);
   return rec;
@@ -965,9 +1064,8 @@ async function select(symbol) {
   renderList();
   try {
     S.etf = await loadEtf(symbol);
-    if (!S.etf.series[TF_BY_ID[S.tf].base]) {
-      S.tf = S.etf.series['1d'] ? '1d' : '1h';
-    }
+    if (!S.etf.series[TF_BY_ID[S.tf].base]) S.tf = '1d';
+    if (navFlatAtStep() && ['candles', 'hollow', 'bars'].includes(S.style)) S.style = 'area';
     renderInstrument();
     renderControls();
     recompute();
@@ -1016,6 +1114,7 @@ async function boot() {
   }
 
   S.manifest = manifest;
+  SPARK_ALPHA = manifest.sparkAlphabet || '';
   if (!manifest.markets[S.market]) S.market = Object.keys(manifest.markets)[0];
 
   root.innerHTML = shellHTML();
@@ -1040,9 +1139,16 @@ async function boot() {
   document.getElementById('btnCsv').onclick = () => doExport('csv');
 
   buildChart();
+  try {
+    await ensureRows(S.market);
+  } catch (err) {
+    document.getElementById('list').innerHTML =
+      `<div style="padding:22px 12px;color:var(--down);font-size:12px">${err.message}</div>`;
+    return;
+  }
   renderList();
-  const first = visibleEtfs()[0];
-  if (first) await select(first.symbol);
+  const opening = openingFund(S.market);
+  if (opening) await select(opening.s);
 }
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);

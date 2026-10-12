@@ -132,23 +132,26 @@ TR_ETFS = [
     ("ZGOLD.IS", "Precious Metal"),
     # Fixed income / money market
     ("FBIST.IS", "Fixed Income"),
+    ("USDTR.IS", "Fixed Income"),
     ("ZPBDL.IS", "Fixed Income"),
     ("ZPT10.IS", "Fixed Income"),
 ]
 
 # Extra Borsa Istanbul candidates probed opportunistically. Anything that
-# returns no price history is silently skipped, so over-listing is harmless.
+# returns no price history is silently skipped, and anything the venue
+# classifies as something other than an ETF is rejected by the retriever, so
+# over-listing is harmless -- several entries here are informed guesses.
 TR_CANDIDATES = [
     "AKBYF.IS", "APETF.IS", "AKGLD.IS", "APGUM.IS", "APKAT.IS", "APTEK.IS",
-    "ISBYF.IS", "ISKUR.IS", "ISY30.IS", "ISGUM.IS", "ISTEK.IS", "ISBNK.IS",
-    "GRTHO.IS", "GPBYF.IS", "GUMUS.IS", "ALTIN.IS",
+    "ISBYF.IS", "ISY30.IS", "ISGUM.IS", "ISTEK.IS", "ISBNK.IS",
+    "GPBYF.IS", "GUMUS.IS", "ALTIN.IS",
     "FYO.IS", "FNSBF.IS", "FDJIS.IS",
     "YKBYF.IS", "YKGLD.IS", "VKBYF.IS", "HLBYF.IS", "TEBBF.IS",
-    "HDFGS.IS", "HEDEF.IS", "ISTBL.IS", "AZTBY.IS", "OYAKB.IS",
+    "ISTBL.IS", "AZTBY.IS", "OYAKB.IS",
     "DNZBF.IS", "FIBBF.IS", "ALBBF.IS", "HSBBF.IS", "TCRBF.IS",
     "REPIE.IS", "NEOBF.IS", "GLBGG.IS", "ATLBF.IS", "ACTBF.IS",
     "STRBF.IS", "ANDBF.IS", "GDKBF.IS", "INFBF.IS", "OSMBF.IS",
-    "TERBF.IS", "UNLBF.IS", "MRMBF.IS", "NASDQ.IS", "USDTR.IS",
+    "TERBF.IS", "UNLBF.IS", "MRMBF.IS", "NASDQ.IS",
     "TRYUS.IS", "ZKBMZ.IS", "ZPLKT.IS", "ZPKTL.IS", "ZPSTR.IS",
 ]
 

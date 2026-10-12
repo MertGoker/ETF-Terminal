@@ -7,7 +7,7 @@
 <title>Bourse ETF Terminal</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,500;0,600;0,700;0,800;0,900;1,400;1,600&display=swap">
 <style>
 /* ======================================================================
    Bourse ETF Terminal — trading-desk instrumentation.
@@ -24,9 +24,12 @@
   --us:#4c8dff; --tr:#e30a17;
   --grid:rgba(255,255,255,.045);
   --shadow:0 1px 2px rgba(0,0,0,.5), 0 12px 32px -18px rgba(0,0,0,.9);
-  --mono:"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,monospace;
-  --sans:"IBM Plex Sans",system-ui,-apple-system,Segoe UI,sans-serif;
-  --disp:"Archivo","IBM Plex Sans",system-ui,sans-serif;
+  /* One typeface throughout. Playfair Display is a Didone: high stroke
+     contrast and proportional figures by default, so every numeric run is
+     pinned to tabular-nums below or price columns would not align. */
+  --mono:"Playfair Display",Georgia,"Times New Roman",serif;
+  --sans:"Playfair Display",Georgia,"Times New Roman",serif;
+  --disp:"Playfair Display",Georgia,"Times New Roman",serif;
   --r:3px; --r-lg:5px;
   color-scheme:dark;
 }
@@ -60,16 +63,17 @@
 *,*::before,*::after{box-sizing:border-box}
 body{
   margin:0; background:var(--ink); color:var(--text);
-  font:400 14px/1.5 var(--sans);
+  font:400 15px/1.55 var(--sans);
+  font-variant-numeric:lining-nums;
   -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
 }
 button,input,select{font:inherit;color:inherit}
 button{cursor:pointer;background:none;border:0}
 :focus-visible{outline:2px solid var(--accent);outline-offset:1px;border-radius:2px}
-.num{font-family:var(--mono);font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+.num{font-family:var(--mono);font-variant-numeric:tabular-nums lining-nums lining-nums;letter-spacing:0}
 .up{color:var(--up)} .down{color:var(--down)} .flat{color:var(--text-2)}
 .eyebrow{
-  font:600 10px/1 var(--sans); letter-spacing:.11em; text-transform:uppercase;
+  font:600 10px/1 var(--sans); letter-spacing:.14em; text-transform:uppercase;
   color:var(--text-3);
 }
 
@@ -91,7 +95,7 @@ button{cursor:pointer;background:none;border:0}
   background:var(--accent-ink);box-shadow:0 5px 0 var(--accent-ink),0 10px 0 var(--accent-ink);
   opacity:.75;
 }
-.brand-name{font:700 17px/1 var(--disp);letter-spacing:-.025em}
+.brand-name{font:700 19px/1 var(--disp);letter-spacing:0}
 .brand-sub{
   font:600 9.5px/1 var(--sans);letter-spacing:.15em;text-transform:uppercase;
   color:var(--text-3);
@@ -103,7 +107,7 @@ button{cursor:pointer;background:none;border:0}
   background:var(--raised);
 }
 .clock-city{font:600 9.5px/1 var(--sans);letter-spacing:.09em;text-transform:uppercase;color:var(--text-3)}
-.clock-time{font-family:var(--mono);font-size:12px;font-variant-numeric:tabular-nums}
+.clock-time{font-family:var(--mono);font-size:12px;font-variant-numeric:tabular-nums lining-nums}
 .sess{
   width:6px;height:6px;border-radius:50%;background:var(--text-3);flex:none;
   box-shadow:0 0 0 2px color-mix(in srgb,var(--text-3) 22%,transparent);
@@ -141,7 +145,7 @@ button{cursor:pointer;background:none;border:0}
 .mtab:hover{background:var(--raised)}
 .mtab-code{
   display:inline-flex;align-items:center;gap:6px;
-  font:700 12px/1 var(--disp);letter-spacing:.02em;
+  font:700 14px/1 var(--disp);letter-spacing:.01em;
 }
 .mtab-code::before{content:"";width:3px;height:11px;border-radius:1px;background:var(--text-3)}
 .mtab[data-market="US"] .mtab-code::before{background:var(--us)}
@@ -177,14 +181,14 @@ button{cursor:pointer;background:none;border:0}
 .row:hover{background:var(--raised)}
 .row[aria-current="true"]{background:var(--raised);border-left-color:var(--accent)}
 .row-id{min-width:0}
-.row-tic{font:600 12.5px/1.25 var(--mono);letter-spacing:-.01em}
+.row-tic{font:600 14px/1.25 var(--mono);letter-spacing:.01em}
 .row-nm{
   font-size:10.5px;color:var(--text-3);line-height:1.3;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
 }
-.row-last{font-family:var(--mono);font-size:12px;font-variant-numeric:tabular-nums;text-align:right}
+.row-last{font-family:var(--mono);font-size:12px;font-variant-numeric:tabular-nums lining-nums;text-align:right}
 .row-chg{
-  font-family:var(--mono);font-size:11px;font-variant-numeric:tabular-nums;
+  font-family:var(--mono);font-size:11px;font-variant-numeric:tabular-nums lining-nums;
   text-align:right;padding:2px 4px;border-radius:2px;
 }
 .row-chg[data-s="u"]{background:var(--up-wash);color:var(--up)}
@@ -203,7 +207,7 @@ button{cursor:pointer;background:none;border:0}
 }
 .ident{min-width:0;flex:1 1 320px}
 .ident-top{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:3px}
-.ticker{font:700 25px/1 var(--disp);letter-spacing:-.03em}
+.ticker{font:700 28px/1.05 var(--disp);letter-spacing:0}
 .chip{
   font:600 9.5px/1 var(--sans);letter-spacing:.09em;text-transform:uppercase;
   padding:4px 6px;border-radius:2px;border:1px solid var(--line-2);color:var(--text-2);
@@ -215,9 +219,9 @@ button{cursor:pointer;background:none;border:0}
 .ident-meta{font-size:11px;color:var(--text-3)}
 .ident-meta span+span::before{content:"·";margin:0 6px;color:var(--line-2)}
 .quote{text-align:right;flex:0 0 auto}
-.q-last{font:600 31px/1 var(--mono);font-variant-numeric:tabular-nums;letter-spacing:-.025em}
+.q-last{font:600 34px/1 var(--mono);font-variant-numeric:tabular-nums lining-nums;letter-spacing:0}
 .q-cur{font:500 13px/1 var(--mono);color:var(--text-3);margin-right:4px}
-.q-chg{display:flex;gap:8px;justify-content:flex-end;margin-top:5px;font-family:var(--mono);font-size:13px;font-variant-numeric:tabular-nums}
+.q-chg{display:flex;gap:8px;justify-content:flex-end;margin-top:5px;font-family:var(--mono);font-size:13px;font-variant-numeric:tabular-nums lining-nums}
 .q-sub{margin-top:6px;font-size:10.5px;color:var(--text-3)}
 
 /* ---------------------------------------------------------------- controls */
@@ -252,7 +256,7 @@ button{cursor:pointer;background:none;border:0}
 .legend{
   position:absolute;top:10px;left:14px;z-index:5;pointer-events:none;
   display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline;
-  font-family:var(--mono);font-size:11.5px;font-variant-numeric:tabular-nums;
+  font-family:var(--mono);font-size:11.5px;font-variant-numeric:tabular-nums lining-nums;
   background:color-mix(in srgb,var(--panel) 86%,transparent);
   border:1px solid var(--line);border-radius:var(--r);padding:6px 10px;
   max-width:calc(100% - 28px);
@@ -276,14 +280,14 @@ button{cursor:pointer;background:none;border:0}
 .stat-k{font:600 9.5px/1 var(--sans);letter-spacing:.09em;text-transform:uppercase;color:var(--text-3)}
 .stat-v{
   margin-top:5px;font-family:var(--mono);font-size:14px;font-weight:500;
-  font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;
+  font-variant-numeric:tabular-nums lining-nums;overflow:hidden;text-overflow:ellipsis;
 }
 .stat-s{margin-top:2px;font-size:10px;color:var(--text-3);font-family:var(--mono)}
 
 /* ------------------------------------------------------------------ export */
 .export{padding:16px 20px 22px;background:var(--panel)}
 .export-top{display:flex;gap:14px;align-items:baseline;flex-wrap:wrap;margin-bottom:10px}
-.export h2{font:600 14px/1.2 var(--disp);letter-spacing:-.01em;margin:0}
+.export h2{font:600 17px/1.2 var(--disp);letter-spacing:0;margin:0}
 .export p{margin:0;font-size:11.5px;color:var(--text-3);max-width:62ch;line-height:1.5}
 .export-grid{
   display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
@@ -292,7 +296,7 @@ button{cursor:pointer;background:none;border:0}
 }
 .ex-cell{background:var(--raised);padding:8px 11px}
 .ex-k{font:600 9.5px/1 var(--sans);letter-spacing:.09em;text-transform:uppercase;color:var(--text-3)}
-.ex-v{margin-top:4px;font-family:var(--mono);font-size:12.5px;font-variant-numeric:tabular-nums}
+.ex-v{margin-top:4px;font-family:var(--mono);font-size:12.5px;font-variant-numeric:tabular-nums lining-nums}
 .btns{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .btn{
   display:inline-flex;align-items:center;gap:7px;
