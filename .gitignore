@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 retriever/raw/
 .DS_Store
+control_plane/.venv/

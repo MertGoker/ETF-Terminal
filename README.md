@@ -42,15 +42,141 @@ python3 retriever/fetch_etfs.py
 # 2. serve the dashboard
 python3 -m http.server 8080 --directory web
 
-# 3. (optional) rebuild the Claude Artifact copy
-python3 build_artifact.py
+# 3. (optional) the control plane behind the System page
+pip install -r control_plane/requirements.txt
+python3 -m uvicorn control_plane.main:app --port 8000
 ```
 
-Requires Python 3.9+ and nothing else. Verified on Python 3.11.4.
+The dashboard requires Python 3.9+ and nothing else — the retriever is standard
+library only. FastAPI and uvicorn are needed solely for the System page's health
+checks and sync button; without them the dashboard still runs, in static mode.
+Verified on Python 3.11.4.
 
 ---
 
-## 3. The process, step by step
+## 3. The four pages
+
+The terminal is one static page with four sections, switched by the nav and
+addressable by hash (`#home`, `#etfs`, `#portfolio`, `#system`). Pages are
+toggled rather than rebuilt, so the chart, the selected fund and the scroll
+position all survive moving between them.
+
+| Page | State |
+|---|---|
+| **Home** | reserved — placeholder only |
+| **ETFs** | the working terminal: fund list, chart, statistics, Excel export |
+| **My Portfolio** | reserved — placeholder only |
+| **System** | operations — health, deployment status, data synchronisation |
+
+Three typefaces, chosen by what each page is for:
+
+| Page | Typeface | Why |
+|---|---|---|
+| ETFs | **Playfair Display** | the Didone trading-desk treatment, unchanged |
+| Home · My Portfolio | **DM Sans** | read rather than scanned, so a clear grotesque |
+| System | **Bitcount Ink** | a machine readout, so a bitmap-grid display face |
+
+Those three are the only families the page loads — one Google Fonts request,
+no fourth face anywhere. On the System page Bitcount Ink carries the structure
+and the numbers: banner titles, status pills, readouts, dates, latencies and the
+streamed log. Buttons, running prose and the URL fields stay in DM Sans, because
+a bitmap grid on a filled button turns to mush at that size and a URL you type
+has to be checkable.
+
+---
+
+## 4. The System page
+
+Four status banners, one line each, so the whole operational picture and both
+actions fit a single screen. Detail sits behind a per-banner disclosure; the two
+buttons sit directly below the banners, each under the stamp it acts on.
+
+1. **Dashboard runtime** — the page you are looking at. Green when the script is
+   running, the manifest parsed, the chart engine loaded, `data/` reachable and
+   browser storage writable. Each probe reports what it measured, not a bare
+   boolean.
+2. **Public deployment** — green when the terminal is served from a public
+   origin. Locally it reads amber ("Local only") until you enter the deployed
+   URL; it then probes that host and goes green or red.
+3. **Control plane** — the FastAPI service in `api/`. Offline is a *supported*
+   state, not a failure: the dashboard is static and works without it, so this
+   reads "Offline — static mode" rather than a false red.
+4. **Data synchronization** — the newest stored bar per market with its age, and
+   the button that refreshes it.
+
+**Run health check** probes all four at once and reports an overall verdict.
+
+### Upstream failures are reported, not buried
+
+The price feed rate-limits by IP, and with backoff a throttled run can go
+minutes without printing anything — indistinguishable from a hang. So the
+retriever emits machine-readable diagnostics:
+
+```
+    ~ RETRY  code=rate_limited subject=SPY wait=9s :: HTTP 429 Too Many Requests
+    ~ GIVEUP code=rate_limited subject=SPY :: HTTP 429 ... after 6 attempts
+```
+
+The control plane parses these, groups them by code and ranks them by
+severity; the System page renders them as cards next to the button, with the
+affected tickers and what to do about it. Three things make a throttle
+visible without reading a log:
+
+* **Before you press it** — `GET /api/upstream` probes each source. A blocked
+  feed turns the panel pill red ("Upstream blocked") and the button reads
+  *Synchronize anyway*, since the retriever backs off and may still get
+  through.
+* **While it runs** — retry and give-up counts accumulate live per error code.
+* **When it stalls** — a job with no progress for 25 s says so, and names the
+  backoff as the reason when the feed is throttling.
+
+### Control plane (optional)
+
+A static page cannot inspect its own data on disk or re-run the retriever. That
+is what `api/` is for.
+
+```bash
+pip install -r control_plane/requirements.txt
+python3 -m uvicorn control_plane.main:app --reload --port 8000
+```
+
+There are **two** control planes answering the same client code. Locally it is
+this FastAPI service, which can read the data directory and run the retriever
+itself. On the deployed site it is the Vercel functions in `api/`, which
+dispatch a GitHub Actions run instead — a serverless function cannot do minutes
+of work and write thousands of files, but it can hold the token that starts
+something which can. The System page detects which one answered and adapts:
+deep health checks and the upstream probe are local-only, because they measure
+the machine the retriever would actually run on.
+
+See **DEPLOY.md** for wiring the button up in production.
+
+| Route | Purpose |
+|---|---|
+| `GET /api/ping` | liveness, version, uptime |
+| `GET /api/health` | deep check — data dir, manifest, fund counts, manifest/disk agreement, retriever modules, freshness, disk |
+| `GET /api/sync/state` | newest stored bar per market |
+| `POST /api/sync` | start a background sync, returns a job id |
+| `GET /api/sync/{id}` | job state, counters, streamed log |
+| `GET /api/jobs` | running job and recent history |
+
+Interactive docs at <http://127.0.0.1:8000/api/docs>.
+
+**What Synchronize does.** It re-runs `retriever/fetch_etfs.py` over the window
+from the manifest's history start to today at the stored daily resolution.
+Because every coarser step — 3D through 1Y — is resampled from daily bars in the
+browser, one daily sync refreshes every step the terminal offers. The job runs
+in the background, the page streams its log, and one sync runs at a time.
+
+**On a deployed site the control plane is not reachable.** A static host serves
+files and nothing else, and a page on HTTPS cannot call `http://127.0.0.1`
+anyway. The System page says so and disables the sync button with the command
+needed to enable it, instead of showing a broken green. Runtime and deployment
+health still work everywhere.
+
+---
+
+## 5. The process, step by step
 
 ```
   Yahoo Finance chart endpoint  (public, keyless)
@@ -126,7 +252,7 @@ python3 -m http.server 8080 --directory web
 
 ---
 
-## 4. Time steps and how they are built
+## 6. Time steps and how they are built
 
 Only **two** resolutions are stored per fund. Everything coarser is resampled
 in the browser, which keeps the payload at ~2.6 MB for 17 funds instead of
@@ -150,7 +276,7 @@ look broken. It costs one request per fund and about 25 KB.
 
 ---
 
-## 5. Borsa İstanbul: a real caveat
+## 7. Borsa İstanbul: a real caveat
 
 Yahoo publishes **6,000+ hourly bars** for BIST ETFs but returns **exactly one
 daily bar** — every `range` and `period1/period2` combination gives the same
@@ -171,7 +297,7 @@ as the hourly feed reaches), not the full listing history.
 
 ---
 
-## 6. If you get HTTP 429
+## 8. If you get HTTP 429
 
 Yahoo throttles cookieless clients **by IP**, and once tripped it stays tripped
 for a while — every server-side request returns `429 Too Many Requests`:
@@ -221,7 +347,7 @@ build.
 
 ---
 
-## 7. Retriever reference
+## 9. Retriever reference
 
 ```bash
 python3 retriever/fetch_etfs.py [options]
@@ -259,7 +385,7 @@ and listed at the end of the run, so over-listing is harmless.
 
 ---
 
-## 8. Deploying free
+## 10. Deploying free
 
 The site is `web/` — static files, no build step. All three of these are free
 forever at this size (~2.6 MB).
@@ -285,7 +411,7 @@ falls back to a normal browser download.
 
 ---
 
-## 9. Using the dashboard
+## 11. Using the dashboard
 
 - **Market tabs** switch between United States and Türkiye. The list is
   filterable by ticker or name, narrowable by sector, and sortable by ticker,
@@ -316,7 +442,7 @@ falls back to a normal browser download.
 
 ---
 
-## 10. Project layout
+## 12. Project layout
 
 ```
 retriever/
@@ -328,6 +454,26 @@ retriever/
   build_from_raw.py    turns a browser capture into the normal data files
   run_sample.sh        a handful of funds per market
   run_all.sh           the full universe, staged 1d then 1h
+control_plane/         local FastAPI control plane (health + sync)
+  main.py              routes, probes, background job runner
+  requirements.txt     fastapi + uvicorn
+api/                   Vercel serverless functions (deployed control plane)
+  ping.mjs             liveness + which mode this plane is
+  sync.mjs             dispatch the GitHub Actions run
+  sync-status.mjs      run progress, normalised to the local job shape
+  sync-state.mjs       newest stored bar, read from the published manifest
+.github/workflows/
+  sync.yml             the retriever job that actually refreshes prices
+control_plane/         local FastAPI control plane (health + sync)
+  main.py              routes, probes, background job runner
+  requirements.txt     fastapi + uvicorn
+api/                   Vercel serverless functions (deployed control plane)
+  ping.mjs             liveness + which mode this plane is
+  sync.mjs             dispatch the GitHub Actions run
+  sync-status.mjs      run progress, normalised to the local job shape
+  sync-state.mjs       newest stored bar, read from the published manifest
+.github/workflows/
+  sync.yml             the retriever job that actually refreshes prices
 web/                   the deployable site
   index.html           markup + design tokens (light and dark)
   app.js               chart, resampling, statistics, export
@@ -341,7 +487,7 @@ vercel.json            static config — output directory web/
 
 ---
 
-## 11. Notes
+## 13. Notes
 
 - Prices are **unadjusted last-traded values** — no dividend or split
   adjustment is applied. Use them for study and coursework, not for

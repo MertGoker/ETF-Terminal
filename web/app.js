@@ -89,6 +89,7 @@ const SESSIONS = {
 
 /* ------------------------------------------------------------------ state */
 const S = {
+  page: 'etfs',
   manifest: null,
   rows: {},             // market -> fund rows, fetched the first time it is shown
   market: 'US',
@@ -619,6 +620,7 @@ function shellHTML() {
       <span class="brand-name">Bourse</span>
       <span class="brand-sub">ETF Terminal</span>
     </div>
+    <nav class="nav" id="nav" aria-label="Sections"></nav>
     <div class="clocks" id="clocks"></div>
     <div class="rail-right">
       <div class="asof"><span class="eyebrow">Data as of</span><b id="asof">—</b></div>
@@ -630,6 +632,12 @@ function shellHTML() {
     </div>
   </header>
 
+  <main>
+  <section class="page" id="page-home" hidden></section>
+  <section class="page" id="page-portfolio" hidden></section>
+  <section class="page" id="page-system" hidden></section>
+
+  <section class="page" id="page-etfs">
   <div class="shell">
     <aside class="pane list-pane">
       <div class="mtabs" role="tablist" id="mtabs"></div>
@@ -657,7 +665,50 @@ function shellHTML() {
     One resolution is stored per fund — <code>1d</code> — and every coarser step is resampled in the browser
     (open = first, high = max, low = min, close = last, volume = sum), bucketed in exchange-local time.
     Figures are unadjusted last-traded prices for study and coursework, not investment advice.
-  </footer>`;
+  </footer>
+  </section>
+  </main>`;
+}
+
+const PAGES = [
+  { id: 'home', label: 'Home' },
+  { id: 'etfs', label: 'ETFs' },
+  { id: 'portfolio', label: 'My Portfolio' },
+  { id: 'system', label: 'System' },
+];
+
+function renderNav() {
+  const el = document.getElementById('nav');
+  el.innerHTML = PAGES.map(p => {
+    const on = S.page === p.id;
+    const badge = p.id === 'etfs' && S.manifest
+      ? `<span class="nav-badge">${Object.values(S.manifest.markets)
+            .reduce((a, m) => a + (m.count || 0), 0).toLocaleString('en-US')}</span>`
+      : '';
+    return `<button class="nav-btn" data-page="${p.id}"
+      ${on ? 'aria-current="page"' : ''}>${p.label}${badge}</button>`;
+  }).join('');
+  el.querySelectorAll('[data-page]').forEach(b =>
+    b.onclick = () => setPage(b.dataset.page));
+}
+
+/* Pages stay in the DOM and are toggled, not rebuilt: the chart is
+   expensive to construct and the ETF page holds scroll position, selection
+   and a loaded fund that should survive a trip to System and back. */
+function setPage(id) {
+  if (!PAGES.some(p => p.id === id)) id = 'etfs';
+  S.page = id;
+  for (const p of PAGES) {
+    const el = document.getElementById('page-' + p.id);
+    if (el) el.hidden = p.id !== id;
+  }
+  renderNav();
+  try { localStorage.setItem('bourse.page', id); } catch (_) {}
+  if (location.hash.slice(1) !== id) history.replaceState(null, '', '#' + id);
+
+  // A chart laid out while its container was hidden has zero width.
+  if (id === 'etfs') fitSoon();
+  if (id === 'system') systemEnter(); else systemLeave();
 }
 
 function wsHTML() {
@@ -1217,12 +1268,23 @@ async function boot() {
 
   root.innerHTML = shellHTML();
   document.getElementById('ws').innerHTML = wsHTML();
+  document.getElementById('page-home').innerHTML = homePageHTML();
+  document.getElementById('page-portfolio').innerHTML = portfolioPageHTML();
+  document.getElementById('page-system').innerHTML = systemPageHTML();
   document.getElementById('asof').textContent =
     new Date(manifest.generatedAt).toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
 
   renderClocks();
   setInterval(renderClocks, 1000);
   initTheme();
+
+  const wanted = location.hash.slice(1) || lsGet('bourse.page', 'etfs');
+  setPage(PAGES.some(p => p.id === wanted) ? wanted : 'etfs');
+  window.addEventListener('hashchange', () => {
+    const id = location.hash.slice(1);
+    if (id && id !== S.page) setPage(id);
+  });
+
   renderTabs();
   renderCats();
 
@@ -1251,6 +1313,7 @@ async function boot() {
       `<div style="padding:22px 12px;color:var(--down);font-size:12px">${err.message}</div>`;
     return;
   }
+  renderNav();
   renderList();
   const opening = openingFund(S.market);
   if (opening) await select(opening.s);
@@ -1258,3 +1321,726 @@ async function boot() {
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
 else boot();
+
+/* =====================================================================
+   Pages beyond the ETF workspace.
+
+   The workspace above is a trading screen: dense, dark, scanned for price
+   action. These pages are read and operated instead, so they use IBM Plex
+   and a lot more air. Home and My Portfolio are deliberately unbuilt —
+   they announce themselves as such rather than faking a dashboard.
+   ===================================================================== */
+
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '']);
+const isLocalHost = h => LOCAL_HOSTS.has(h) || h.endsWith('.localhost') || h.endsWith('.test');
+
+function lsGet(k, fallback = '') {
+  try { return localStorage.getItem(k) ?? fallback; } catch (_) { return fallback; }
+}
+function lsSet(k, v) {
+  try { localStorage.setItem(k, v); } catch (_) {}
+}
+
+/* Two control planes answer the same client code. Locally it is the FastAPI
+   service, which can read the data directory and run the retriever itself.
+   On the deployed site it is the Vercel functions in `api/`, which dispatch a
+   GitHub Actions run instead — a serverless function cannot do the work, but
+   it can hold the token that starts something that can. */
+function defaultApiBase() {
+  const local = isLocalHost(location.hostname) || location.protocol === 'file:';
+  const stored = lsGet('bourse.apiBase', '');
+  // A base saved while developing must not follow you to production.
+  if (stored && (local || !/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])/.test(stored))) {
+    return stored;
+  }
+  return local ? 'http://127.0.0.1:8000' : location.origin;
+}
+
+const SYS = {
+  api: { base: defaultApiBase(), mode: null, state: 'idle', ping: null, health: null, ms: null },
+  deploy: { url: lsGet('bourse.publicUrl', ''), state: 'idle', ms: null, detail: '' },
+  runtime: { state: 'idle', checks: [], ms: null },
+  sync: { state: null, job: null, poll: null, busy: false },
+  upstream: null,
+  lastRun: null,
+  entered: false,
+};
+
+/* ------------------------------------------------------------- placeholders */
+function placeholderHTML(kicker, title, lede, mark, planned) {
+  return `<div class="plain">
+    <div class="page-head">
+      <div class="page-kicker">${kicker}</div>
+      <h1 class="page-title">${title}</h1>
+      <p class="page-lede">${lede}</p>
+    </div>
+    <div class="placeholder">
+      <div class="placeholder-mark">${mark}</div>
+      <h2>Not built yet</h2>
+      <p>This section is reserved. Nothing here is live, and nothing on it is
+         wired to your data — the ETFs and System pages are the working parts
+         of the terminal today.</p>
+      <div class="planned">${planned.map(x => `<span>${x}</span>`).join('')}</div>
+    </div>
+  </div>`;
+}
+
+const ICON_HOME = `<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5"/><path d="M5.5 9.5V20h13V9.5"/><path d="M10 20v-5.5h4V20"/></svg>`;
+const ICON_PORT = `<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8.5 7V5.5A1.5 1.5 0 0 1 10 4h4a1.5 1.5 0 0 1 1.5 1.5V7"/><path d="M3 12h18"/></svg>`;
+
+function homePageHTML() {
+  return placeholderHTML(
+    'Overview', 'Home',
+    'A standing view of both markets — breadth, movers and the state of the data behind them.',
+    ICON_HOME,
+    ['Market breadth', 'Top movers', 'Theme performance', 'Data freshness']);
+}
+
+function portfolioPageHTML() {
+  return placeholderHTML(
+    'Positions', 'My Portfolio',
+    'Your own holdings valued against the same price history the terminal charts.',
+    ICON_PORT,
+    ['Holdings', 'Cost basis', 'Allocation', 'Return vs benchmark']);
+}
+
+/* ----------------------------------------------------------------- system */
+function bannerHTML(n, id, title, sub, pillId, readId, subId, body) {
+  return `<div class="bn" data-bn="${id}" data-open="0">
+    <button class="bn-head" aria-expanded="false" data-toggle="${id}">
+      <span class="bn-n">${n}</span>
+      <span class="bn-id"><b>${title}</b><small>${sub}</small></span>
+      <span class="bn-read"><b id="${readId}">—</b><span id="${subId}">not checked</span></span>
+      <span class="pill" data-s="idle" id="${pillId}">Idle</span>
+      <span class="bn-caret" aria-hidden="true">›</span>
+    </button>
+    <div class="bn-body" hidden>${body}</div>
+  </div>`;
+}
+
+function systemPageHTML() {
+  return `<div class="plain">
+    <div class="page-head">
+      <div class="page-kicker">Operations</div>
+      <h1 class="page-title">System</h1>
+      <p class="page-lede">Health of the dashboard, its public deployment and the control
+         plane behind it — plus the one action that changes anything: bringing stored
+         prices up to today.</p>
+    </div>
+
+    <div class="banners">
+      ${bannerHTML('01', 'runtime', 'Dashboard runtime', 'The page you are looking at',
+        'pillRuntime', 'rtScore', 'rtSummary',
+        `<div class="checks" id="rtChecks"></div>`)}
+
+      ${bannerHTML('02', 'deploy', 'Public deployment', 'Is the terminal live on the web',
+        'pillDeploy', 'dpState', 'dpSummary',
+        `<dl class="kv" id="dpMeta"></dl>
+         <div class="field">
+           <input id="dpUrl" type="url" spellcheck="false" placeholder="https://your-site.vercel.app">
+           <button class="action" id="btnDeploySave">Save</button>
+         </div>
+         <p class="hint" id="dpHint"></p>`)}
+
+      ${bannerHTML('03', 'api', 'Control plane', 'FastAPI health and sync service',
+        'pillApi', 'apiState', 'apiSummary',
+        `<dl class="kv" id="apiMeta"></dl>
+         <div class="checks" id="apiChecks"></div>
+         <div class="field">
+           <input id="apiUrl" type="url" spellcheck="false" placeholder="http://127.0.0.1:8000">
+           <button class="action" id="btnApiSave">Save</button>
+         </div>
+         <p class="hint" id="apiHint"></p>`)}
+
+      ${bannerHTML('04', 'sync', 'Data synchronization', 'Newest stored bar → today',
+        'pillSync', 'syncState', 'syncSummary',
+        `<div class="src" id="syncUpstream"></div>
+         <p class="hint" id="syncHint">Daily bars are the stored resolution; every coarser
+            step — 3D through 1Y — is resampled from them in the browser, so one daily
+            sync refreshes every step the terminal offers.</p>`)}
+    </div>
+
+    <div class="ops">
+      <div class="ops-item">
+        <div class="ops-k">All subsystems</div>
+        <div class="ops-v" id="sysStamp">not checked</div>
+        <button class="action action-primary" id="btnHealth">Run health check</button>
+      </div>
+      <div class="ops-item">
+        <div class="ops-k">Latest data on record</div>
+        <div class="ops-v" id="syncStamp">—</div>
+        <button class="action action-primary" id="btnSync" disabled>Synchronize now</button>
+      </div>
+    </div>
+
+    <div class="ops-extra">
+      <div class="bar" id="syncBar" hidden><i style="width:0"></i></div>
+      <div class="stall" id="syncStall" hidden></div>
+      <div class="diag" id="syncDiag"></div>
+      <div class="console" id="syncLog"></div>
+    </div>
+  </div>`;
+}
+
+function wireBanners() {
+  document.querySelectorAll('#page-system [data-toggle]').forEach(btn => {
+    btn.onclick = () => {
+      const wrap = btn.closest('.bn');
+      const open = wrap.dataset.open === '1';
+      wrap.dataset.open = open ? '0' : '1';
+      btn.setAttribute('aria-expanded', String(!open));
+      wrap.querySelector('.bn-body').hidden = open;
+    };
+  });
+}
+
+/* The dispatch plane has no deep health check and no upstream probe: it runs
+   nowhere near the data or the feeds. Routes it does not serve are null, and
+   the probes below branch on that rather than guessing. */
+function routes() {
+  const base = SYS.api.base.replace(/\/+$/, '');
+  const gha = SYS.api.mode === 'github-actions';
+  return {
+    gha,
+    ping: base + '/api/ping',
+    health: gha ? null : base + '/api/health',
+    upstream: gha ? null : base + '/api/upstream',
+    state: base + (gha ? '/api/sync-state' : '/api/sync/state'),
+    start: base + '/api/sync',
+    job: id => base + (gha ? `/api/sync-status?id=${encodeURIComponent(id)}`
+                           : `/api/sync/${id}`),
+  };
+}
+
+/* ------------------------------------------------------------------ probes */
+async function fetchJSON(url, ms = 6000) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), ms);
+  const t0 = performance.now();
+  try {
+    const res = await fetch(url, { signal: ctl.signal, cache: 'no-store' });
+    const ms_ = Math.round(performance.now() - t0);
+    if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status}`), { ms: ms_ });
+    return { data: await res.json(), ms: ms_ };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function setPill(id, state, text) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.dataset.s = state;
+  el.textContent = text;
+}
+
+function checkRow(c) {
+  const glyph = { pass: '✓', warn: '!', error: '✕', run: '•' }[c.status] || '•';
+  return `<div class="check" data-s="${c.status}">
+    <i>${glyph}</i><span><b>${c.name}</b></span><em>${c.detail}</em></div>`;
+}
+
+/* 01 — the page itself. "Open" is not a health check on its own, so this
+   probes the things that are actually load-bearing for the dashboard. */
+async function probeRuntime() {
+  setPill('pillRuntime', 'busy', 'Checking');
+  const checks = [];
+  const t0 = performance.now();
+
+  checks.push({ name: 'Script runtime', status: 'pass', detail: 'executing' });
+  checks.push({
+    name: 'Manifest', status: S.manifest ? 'pass' : 'error',
+    detail: S.manifest ? `${Object.values(S.manifest.markets).reduce((a, m) => a + (m.count || 0), 0).toLocaleString('en-US')} funds` : 'not loaded',
+  });
+  checks.push({
+    name: 'Chart engine', status: window.LightweightCharts ? 'pass' : 'error',
+    detail: window.LightweightCharts ? 'lightweight-charts ready' : 'library blocked',
+  });
+
+  let dataMs = null, dataOk = false;
+  try {
+    const r = await fetchJSON(DATA + 'manifest.json', 5000);
+    dataMs = r.ms; dataOk = true;
+  } catch (err) { dataMs = err.ms ?? null; }
+  checks.push({
+    name: 'Market data', status: dataOk ? 'pass' : 'error',
+    detail: dataOk ? `data/ reachable · ${dataMs} ms` : 'data/ unreachable',
+  });
+
+  // Row tables are fetched the first time a market is shown. Not having
+  // them yet is the design, not a fault, so this reports state rather than
+  // marking the runtime degraded for working as intended.
+  const loaded = Object.keys(S.rows || {}).length;
+  checks.push({
+    name: 'Fund rows', status: 'pass',
+    detail: loaded ? `${loaded} market(s) cached` : 'lazy — loaded on first view',
+  });
+
+  let storage = false;
+  try { localStorage.setItem('bourse.probe', '1'); localStorage.removeItem('bourse.probe'); storage = true; } catch (_) {}
+  checks.push({
+    name: 'Browser storage', status: storage ? 'pass' : 'warn',
+    detail: storage ? 'writable' : 'blocked (private mode)',
+  });
+
+  const bad = checks.filter(c => c.status === 'error').length;
+  const warn = checks.filter(c => c.status === 'warn').length;
+  const state = bad ? 'error' : warn ? 'warn' : 'pass';
+  SYS.runtime = { state, checks, ms: Math.round(performance.now() - t0) };
+
+  setPill('pillRuntime', state, state === 'pass' ? 'Operational' : state === 'warn' ? 'Degraded' : 'Failing');
+  setBanner('rtScore', 'rtSummary', `${checks.length - bad - warn}/${checks.length}`,
+    `checks passed · ${SYS.runtime.ms} ms`);
+  document.getElementById('rtChecks').innerHTML = checks.map(checkRow).join('');
+  return state;
+}
+
+/* 02 — served from a public origin, or reachable at the configured one. */
+async function probeDeploy() {
+  setPill('pillDeploy', 'busy', 'Checking');
+  const host = location.hostname;
+  const local = isLocalHost(host) || location.protocol === 'file:';
+  const meta = [];
+  let state, big, summary, hint = '';
+
+  if (!local) {
+    state = 'pass';
+    big = 'Live';
+    summary = `served from ${host}`;
+    meta.push(['Origin', location.origin]);
+    meta.push(['Protocol', location.protocol.replace(':', '')]);
+    meta.push(['Secure context', window.isSecureContext ? 'yes' : 'no']);
+    SYS.deploy = { ...SYS.deploy, state, ms: null, detail: host };
+  } else if (!SYS.deploy.url) {
+    state = 'warn';
+    big = 'Local';
+    summary = 'public URL not set';
+    meta.push(['Origin', location.origin || 'file://']);
+    hint = 'Running locally. Enter the deployed URL to probe whether the published site is up.';
+    SYS.deploy = { ...SYS.deploy, state, ms: null, detail: 'local only' };
+  } else {
+    // A cross-origin opaque request cannot be read, but it still fails
+    // loudly when the host is unreachable — enough to answer "is it up".
+    const t0 = performance.now();
+    try {
+      await fetch(SYS.deploy.url, { mode: 'no-cors', cache: 'no-store' });
+      const ms = Math.round(performance.now() - t0);
+      state = 'pass'; big = 'Live';
+      summary = `reachable · ${ms} ms`;
+      meta.push(['Deployed URL', SYS.deploy.url]);
+      meta.push(['Probe', 'opaque GET (no-cors)']);
+      meta.push(['Local origin', location.origin || 'file://']);
+      SYS.deploy = { ...SYS.deploy, state, ms, detail: 'reachable' };
+    } catch (err) {
+      state = 'error'; big = 'Down';
+      summary = 'unreachable from this browser';
+      meta.push(['Deployed URL', SYS.deploy.url]);
+      meta.push(['Error', String(err.message || err).slice(0, 48)]);
+      hint = 'The published site did not answer. Check the deployment, or the URL above.';
+      SYS.deploy = { ...SYS.deploy, state, ms: null, detail: 'unreachable' };
+    }
+  }
+
+  setPill('pillDeploy', state, state === 'pass' ? 'Online' : state === 'warn' ? 'Local only' : 'Offline');
+  setBanner('dpState', 'dpSummary', big, summary);
+  document.getElementById('dpMeta').innerHTML =
+    meta.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+  document.getElementById('dpHint').textContent = hint;
+  return state;
+}
+
+/* 03 — the FastAPI control plane. Absent is a normal state, not a fault:
+   the dashboard is static and works without it. */
+async function probeApi() {
+  setPill('pillApi', 'busy', 'Checking');
+  const base = SYS.api.base.replace(/\/+$/, '');
+  const meta = [], mixed = location.protocol === 'https:' && base.startsWith('http://');
+  let state, big, summary, hint = '', checks = [];
+
+  try {
+    const ping = await fetchJSON(base + '/api/ping', 4000);
+    SYS.api.ping = ping.data; SYS.api.ms = ping.ms;
+    SYS.api.mode = ping.data.mode || 'local';
+    meta.push(['Endpoint', base || location.origin]);
+    meta.push(['Mode', SYS.api.mode === 'github-actions' ? 'dispatch → GitHub Actions' : 'local service']);
+    meta.push(['Latency', ping.ms + ' ms']);
+
+    if (SYS.api.mode === 'github-actions') {
+      // Nothing deeper to ask: this plane holds a token and forwards one call.
+      meta.push(['Repository', ping.data.repo || 'not resolved']);
+      meta.push(['Workflow', `${ping.data.workflow || 'sync.yml'} @ ${ping.data.ref || 'main'}`]);
+      state = ping.data.configured ? 'pass' : 'warn';
+      big = ping.data.configured ? 'Dispatch' : 'Unconfigured';
+      summary = ping.data.detail || 'ready to dispatch';
+      if (!ping.data.configured) hint = ping.data.detail || '';
+      SYS.api.state = state;
+      setPill('pillApi', state, state === 'pass' ? 'Dispatch ready' : 'Needs a token');
+      setBanner('apiState', 'apiSummary', big, summary);
+      document.getElementById('apiMeta').innerHTML =
+        meta.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+      document.getElementById('apiChecks').innerHTML = '';
+      document.getElementById('apiHint').textContent = hint;
+      return state;
+    }
+
+    meta.push(['Version', ping.data.version || '—']);
+    meta.push(['Uptime', fmtUptime(ping.data.uptimeSeconds)]);
+
+    try {
+      const h = await fetchJSON(routes().health, 15000);
+      SYS.api.health = h.data;
+      checks = h.data.checks || [];
+      state = h.data.status === 'pass' ? 'pass' : h.data.status === 'warn' ? 'warn' : 'error';
+      big = state === 'pass' ? 'Healthy' : state === 'warn' ? 'Degraded' : 'Failing';
+      const n = checks.length, bad = checks.filter(c => c.status !== 'pass').length;
+      summary = `${n - bad}/${n} backend checks passed · ${h.ms} ms`;
+      meta.push(['Python', (h.data.runtime || {}).python || '—']);
+    } catch (err) {
+      state = 'warn'; big = 'Partial';
+      summary = 'ping ok, deep check failed';
+      hint = String(err.message || err);
+    }
+    SYS.api.state = state;
+  } catch (err) {
+    SYS.api.state = 'error'; SYS.api.ping = null; SYS.api.health = null;
+    state = 'error'; big = 'Offline';
+    summary = 'control plane not reachable';
+    meta.push(['Endpoint', base]);
+    meta.push(['Error', String(err.message || err).slice(0, 48)]);
+    hint = mixed
+      ? 'This page is on HTTPS and the control plane is on plain HTTP, so the browser blocks the call. Run the dashboard locally to use it, or put the API behind HTTPS.'
+      : 'Static mode — the dashboard works without it. Locally: pip install -r control_plane/requirements.txt, then python3 -m uvicorn control_plane.main:app --port 8000. On the deployed site this is served by the Vercel functions in api/.';
+  }
+
+  setPill('pillApi', state, state === 'pass' ? 'Connected' : state === 'warn' ? 'Degraded' : 'Offline');
+  setBanner('apiState', 'apiSummary', big, summary);
+  document.getElementById('apiMeta').innerHTML =
+    meta.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+  document.getElementById('apiChecks').innerHTML = checks.map(checkRow).join('');
+  document.getElementById('apiHint').textContent = hint;
+  return state;
+}
+
+function fmtUptime(sec) {
+  if (sec == null) return '—';
+  const s = Math.floor(sec);
+  if (s < 90) return s + ' s';
+  if (s < 5400) return Math.round(s / 60) + ' min';
+  if (s < 172800) return (s / 3600).toFixed(1) + ' h';
+  return (s / 86400).toFixed(1) + ' d';
+}
+
+/* Upstream reachability. The retriever can only be as healthy as the feeds
+   it reads, and a throttled source is by far the most common reason a sync
+   produces nothing — so it is reported before the button, not after. */
+async function probeUpstream() {
+  const el = document.getElementById('syncUpstream');
+  if (!el) return null;
+  const r = routes();
+  if (!r.upstream) {
+    // The runner reaches the feeds, not this browser; claiming otherwise
+    // would be measuring the wrong machine.
+    SYS.upstream = null;
+    el.innerHTML = `<div class="src-row" data-s="idle"><span class="dot"></span>
+      <span><b>Feed reachability</b><small>measured by the Actions runner, not this browser</small></span>
+      <em>n/a</em></div>`;
+    return null;
+  }
+  el.innerHTML = `<div class="src-row" data-s="idle"><span class="dot"></span>
+    <span><b>Checking data sources…</b></span><em></em></div>`;
+  try {
+    const { data } = await fetchJSON(r.upstream, 25000);
+    SYS.upstream = data;
+    el.innerHTML = data.sources.map(r => `
+      <div class="src-row" data-s="${r.status}">
+        <span class="dot"></span>
+        <span><b>${r.label}</b><small>${r.detail}</small></span>
+        <em>${r.ms} ms</em>
+      </div>`).join('');
+    return data;
+  } catch (_) {
+    SYS.upstream = null;
+    el.innerHTML = '';
+    return null;
+  }
+}
+
+function renderDiagnostics(diags) {
+  const el = document.getElementById('syncDiag');
+  if (!el) return;
+  if (!diags || !diags.length) { el.innerHTML = ''; return; }
+  el.innerHTML = diags.map(d => {
+    const n = [];
+    if (d.retries) n.push(`${d.retries} retried`);
+    if (d.failures) n.push(`${d.failures} gave up`);
+    return `<div class="diag-card" data-s="${d.severity}">
+      <div class="diag-top"><b>${d.title}</b>
+        <span class="diag-count">${n.join(' · ') || d.code}</span></div>
+      <p class="diag-detail">${d.detail || d.code}</p>
+      ${d.hint ? `<p class="diag-hint">${d.hint}</p>` : ''}
+      ${d.subjects && d.subjects.length
+        ? `<div class="diag-subj">${d.subjects.slice(0, 10).map(x => `<span>${x}</span>`).join('')}
+           ${d.subjects.length > 10 ? `<span>+${d.subjects.length - 10}</span>` : ''}</div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+/* 04 — synchronisation. The date above the button is the newest bar the
+   terminal actually holds; pressing it refreshes everything from the
+   manifest's history start through today at the stored daily resolution. */
+function ageState(days) { return days <= 4 ? 'ok' : days <= 10 ? 'warn' : 'bad'; }
+
+function setBanner(readId, subId, big, sub) {
+  const a = document.getElementById(readId), b = document.getElementById(subId);
+  if (a) a.textContent = big;
+  if (b) b.textContent = sub;
+}
+
+async function refreshSyncState() {
+  const stamp = document.getElementById('syncStamp');
+  const btn = document.getElementById('btnSync');
+  const hintEl = document.getElementById('syncHint');
+  if (!stamp) return;
+
+  try {
+    const { data } = await fetchJSON(routes().state, 15000);
+    SYS.sync.state = data;
+    const rows = Object.entries(data.freshness || {});
+    stamp.innerHTML = rows.length ? rows.map(([mk, f]) =>
+      `<span>${mk} ${f.lastBar}
+       <span class="age" data-s="${ageState(f.ageDays)}">${f.ageDays}d</span></span>`).join('')
+      : '<span>no stored bars found</span>';
+    const oldest = rows.length ? Math.max(...rows.map(([, f]) => f.ageDays)) : null;
+    setBanner('syncState', 'syncSummary',
+      oldest == null ? '—' : `${oldest}d`,
+      oldest == null ? 'no stored bars' : `since the newest stored bar · ${rows.length} markets`);
+
+    if (data.running) {
+      watchJob(data.running);
+    } else {
+      const up = SYS.upstream;
+      const blocked = up && up.canSync === false;
+      btn.disabled = false;
+      const worst = Math.max(...rows.map(([, f]) => f.ageDays), 0);
+      // A blocked feed does not disable the button — the retriever backs off
+      // and may still get through — but it must not look like a clean run.
+      btn.textContent = blocked
+        ? 'Synchronize anyway'
+        : worst > 0 ? `Synchronize ${data.historyStart} → today` : 'Synchronize now';
+      setPill('pillSync',
+        blocked ? 'error' : rows.length && worst <= 4 ? 'pass' : rows.length ? 'warn' : 'idle',
+        blocked ? 'Upstream blocked'
+          : rows.length ? (worst <= 4 ? 'Current' : 'Stale') : 'Unknown');
+      if (blocked) {
+        const src = (up.sources || []).find(r => r.code === 'rate_limited') || {};
+        renderDiagnostics([{
+          severity: 'error', title: src.title || 'Upstream is rate-limiting',
+          detail: `${src.label || 'Upstream'} — ${src.detail || 'blocked'}`,
+          hint: src.hint || '', retries: 0, failures: 0, code: 'rate_limited', subjects: [],
+        }]);
+      } else {
+        renderDiagnostics(null);
+      }
+    }
+    hintEl.textContent = data.note || hintEl.textContent;
+  } catch (_) {
+    // No control plane: fall back to what the manifest says, and say why
+    // the button cannot run.
+    const gen = S.manifest && S.manifest.generatedAt;
+    const age = gen ? Math.round((Date.now() - Date.parse(gen)) / 86400000) : null;
+    stamp.innerHTML = gen
+      ? `<span>${gen.slice(0, 10)}
+         <span class="age" data-s="${ageState(age)}">${age}d</span></span>`
+      : '<span>unknown</span>';
+    setBanner('syncState', 'syncSummary', age == null ? '—' : `${age}d`,
+      'from the manifest — control plane offline');
+    btn.disabled = true;
+    btn.textContent = 'Synchronize now';
+    setPill('pillSync', 'idle', 'No control plane');
+    hintEl.textContent =
+      'Synchronisation needs the control plane. Start it with ' +
+      'python3 -m uvicorn api.main:app --port 8000, then re-run the health check.';
+  }
+}
+
+function logLine(line) {
+  const cls = / ok |— retriever exited with code 0/.test(line) ? 'ok'
+    : /skip|error|failed|! /i.test(line) ? 'bad'
+    : line.startsWith('$') ? 'cmd' : '';
+  return `<span class="${cls}">${line.replace(/[<&]/g, c => ({ '<': '&lt;', '&': '&amp;' }[c]))}</span>`;
+}
+
+function renderJob(job) {
+  const bar = document.getElementById('syncBar');
+  const log = document.getElementById('syncLog');
+  const btn = document.getElementById('btnSync');
+  if (!bar) return;
+
+  const running = job.state === 'running' || job.state === 'starting';
+  bar.hidden = !running && job.state !== 'done' && job.state !== 'failed';
+  bar.dataset.indeterminate = running ? '1' : '0';
+  bar.querySelector('i').style.width = running ? '' : '100%';
+
+  btn.disabled = running;
+  // A throttled source can leave the retriever backing off for minutes with
+  // nothing to print, so show elapsed time: a slow run and a hung one look
+  // identical without it.
+  const elapsed = job.startedAt
+    ? Math.max(0, Math.round((Date.now() - Date.parse(job.startedAt)) / 1000)) : 0;
+  const clock = elapsed >= 60
+    ? `${Math.floor(elapsed / 60)}m ${String(elapsed % 60).padStart(2, '0')}s`
+    : `${elapsed}s`;
+  btn.textContent = running
+    ? (job.ok == null ? `Synchronizing… ${clock}` : `Synchronizing… ${job.ok} funds · ${clock}`)
+    : job.state === 'done' ? `Synchronize again · took ${clock}` : 'Retry synchronization';
+
+  const diags = job.diagnostics || [];
+  const blocking = diags.find(d => d.code === 'rate_limited');
+  setPill('pillSync',
+    running ? (blocking ? 'error' : 'busy') : job.state === 'done' ? 'pass' : 'error',
+    running ? (blocking ? 'Throttled' : 'Running')
+      : job.state === 'done' ? (diags.length ? 'Synced with warnings' : 'Synced') : 'Failed');
+  renderDiagnostics(diags);
+
+  // Backoff can run for minutes with nothing printed; say so rather than
+  // leaving a progress bar that looks hung.
+  const stall = document.getElementById('syncStall');
+  if (running && job.stalledSeconds > 25) {
+    stall.hidden = false;
+    stall.textContent = blocking
+      ? `Backing off — no progress for ${job.stalledSeconds}s while the feed is throttling`
+      : `Waiting on the feed — no progress for ${job.stalledSeconds}s`;
+  } else {
+    stall.hidden = true;
+  }
+
+  if (job.log && job.log.length) {
+    log.innerHTML = job.log.map(logLine).join('\n');
+    log.scrollTop = log.scrollHeight;
+  }
+  // A dispatched run's real log lives on GitHub; link to it rather than
+  // pretending the few status lines above are the whole story.
+  const extra = document.querySelector('.ops-extra');
+  let link = document.getElementById('runLink');
+  if (job.runUrl) {
+    if (!link) {
+      link = document.createElement('a');
+      link.id = 'runLink';
+      link.className = 'action';
+      link.target = '_blank';
+      link.rel = 'noopener';
+      extra.insertBefore(link, extra.firstChild);
+    }
+    link.href = job.runUrl;
+    link.textContent = `Open run #${job.runNumber ?? ''} on GitHub →`;
+  } else if (link) {
+    link.remove();
+  }
+}
+
+function watchJob(jobId) {
+  clearInterval(SYS.sync.poll);
+  const r = routes();
+  const tick = async () => {
+    try {
+      const url = r.gha ? r.job(jobId) : `${r.job(jobId)}?tail=80`;
+      const { data } = await fetchJSON(url, 10000);
+      SYS.sync.job = data;
+      renderJob(data);
+      if (data.state === 'done' || data.state === 'failed') {
+        clearInterval(SYS.sync.poll);
+        SYS.sync.poll = null;
+        SYS.sync.busy = false;
+        if (data.state === 'done') setTimeout(refreshSyncState, 600);
+      }
+    } catch (err) {
+      clearInterval(SYS.sync.poll);
+      SYS.sync.poll = null;
+      SYS.sync.busy = false;
+      setPill('pillSync', 'error', 'Lost contact');
+    }
+  };
+  SYS.sync.poll = setInterval(tick, r.gha ? 6000 : 1500);
+  tick();
+}
+
+async function startSync() {
+  if (SYS.sync.busy) return;
+  SYS.sync.busy = true;
+  const log = document.getElementById('syncLog');
+  setPill('pillSync', 'busy', 'Starting');
+  log.innerHTML = logLine('$ requesting sync…');
+  try {
+    const res = await fetch(routes().start, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ markets: ['US', 'TR'] }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    watchJob(data.id);
+  } catch (err) {
+    SYS.sync.busy = false;
+    setPill('pillSync', 'error', 'Failed to start');
+    log.innerHTML = logLine('! ' + (err.message || err));
+    document.getElementById('btnSync').disabled = false;
+  }
+}
+
+/* ------------------------------------------------------- orchestration */
+async function runHealthCheck() {
+  const btn = document.getElementById('btnHealth');
+  btn.disabled = true;
+  btn.textContent = 'Checking…';
+  document.getElementById('sysStamp').textContent = 'Probing subsystems…';
+
+  const [rt, dp, api] = await Promise.all([probeRuntime(), probeDeploy(), probeApi()]);
+  await probeUpstream();          // before the sync state, which reads it
+  await refreshSyncState();
+
+  // The control plane being absent is not a dashboard fault: a static
+  // deployment is a supported way to run this, so it never reads red here.
+  const weights = { pass: 0, warn: 1, error: 2, idle: 0 };
+  const upstream = SYS.upstream ? (SYS.upstream.canSync === false ? 1 : weights[SYS.upstream.status] ?? 0) : 0;
+  const worst = Math.max(weights[rt] ?? 0, weights[dp] ?? 0,
+                         api === 'error' ? 1 : (weights[api] ?? 0), upstream);
+  const overall = worst === 0 ? 'pass' : worst === 1 ? 'warn' : 'error';
+
+  SYS.lastRun = new Date();
+  const verdict = overall === 'pass' ? 'All systems normal'
+    : overall === 'warn' ? 'Attention' : 'Failing';
+  document.getElementById('sysStamp').innerHTML =
+    `<span class="age" data-s="${overall === 'pass' ? 'ok' : overall === 'warn' ? 'warn' : 'bad'}">${verdict}</span>` +
+    `<span>${SYS.lastRun.toISOString().replace('T', ' ').slice(11, 19)} UTC</span>`;
+  btn.disabled = false;
+  btn.textContent = 'Run health check';
+}
+
+function systemEnter() {
+  if (SYS.entered) return;
+  SYS.entered = true;
+
+  wireBanners();
+  document.getElementById('apiUrl').value = SYS.api.base;
+  document.getElementById('dpUrl').value = SYS.deploy.url;
+
+  document.getElementById('btnHealth').onclick = runHealthCheck;
+  document.getElementById('btnSync').onclick = startSync;
+  document.getElementById('btnApiSave').onclick = () => {
+    const v = document.getElementById('apiUrl').value.trim() || 'http://127.0.0.1:8000';
+    SYS.api.base = v; lsSet('bourse.apiBase', v);
+    probeApi().then(refreshSyncState);
+  };
+  document.getElementById('btnDeploySave').onclick = () => {
+    const v = document.getElementById('dpUrl').value.trim();
+    SYS.deploy.url = v; lsSet('bourse.publicUrl', v);
+    probeDeploy();
+  };
+
+  runHealthCheck();
+}
+
+function systemLeave() {
+  clearInterval(SYS.sync.poll);
+  SYS.sync.poll = null;
+}

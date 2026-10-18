@@ -1,0 +1,114 @@
+# Refresh stored prices and commit them back.
+#
+# This is the half of the System page's Synchronize button that a static host
+# cannot run: the retriever is network-bound, takes minutes, and writes
+# thousands of files into web/data. A GitHub runner can do all three — and it
+# gets a fresh IP on every run, which is the practical reason this exists:
+# the price feed rate-limits by IP, and a developer machine that has been
+# throttled stays throttled for hours.
+#
+# Pushing to the default branch is what triggers the Vercel deployment, so a
+# successful run publishes itself.
+
+name: Sync prices
+
+on:
+  # Weekly by default. This repository is private, so Actions minutes come out
+  # of the account quota, and a full run over ~7,800 funds is not short. Switch
+  # to the weekday line below only if the quota allows it:
+  #   - cron: "10 23 * * 1-5"   # weekdays, 23:10 UTC (after the US close)
+  schedule:
+    - cron: "10 23 * * 6"       # Saturdays, 23:10 UTC
+  workflow_dispatch:
+    inputs:
+      markets:
+        description: "Markets to refresh"
+        type: choice
+        default: "US TR"
+        options: ["US TR", "US", "TR"]
+      since:
+        description: "First day to refresh (YYYY-MM-DD, blank = manifest history start)"
+        type: string
+        required: false
+
+# A second run while one is in flight would fight it over the same files.
+concurrency:
+  group: sync-prices
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Resolve the window to refresh
+        id: window
+        run: |
+          SINCE="${{ inputs.since }}"
+          if [ -z "$SINCE" ]; then
+            SINCE=$(python3 -c "import json;print(json.load(open('web/data/manifest.json')).get('historyStart','2026-01-01'))")
+          fi
+          echo "since=$SINCE" >> "$GITHUB_OUTPUT"
+          echo "Refreshing from $SINCE to today"
+
+      - name: Retrieve prices
+        id: retrieve
+        run: |
+          python3 -u retriever/fetch_etfs.py \
+            --markets ${{ inputs.markets || 'US TR' }} \
+            --intervals 1d \
+            --history-start "${{ steps.window.outputs.since }}" \
+            --refresh \
+            --workers 4 \
+            2>&1 | tee /tmp/sync.log
+          echo "ok=$(grep -c ' ok ' /tmp/sync.log || true)" >> "$GITHUB_OUTPUT"
+          echo "skipped=$(grep -c ' skip ' /tmp/sync.log || true)" >> "$GITHUB_OUTPUT"
+
+      - name: Summarise what the feed did
+        if: always()
+        run: |
+          {
+            echo "### Sync result"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Window | ${{ steps.window.outputs.since }} → today |"
+            echo "| Markets | ${{ inputs.markets || 'US TR' }} |"
+            echo "| Funds written | ${{ steps.retrieve.outputs.ok }} |"
+            echo "| Funds skipped | ${{ steps.retrieve.outputs.skipped }} |"
+            echo ""
+            # The retriever tags every upstream problem with a stable code.
+            if grep -q '~ RETRY\|~ GIVEUP' /tmp/sync.log 2>/dev/null; then
+              echo "#### Upstream diagnostics"
+              echo '```'
+              grep -oE 'code=[a-z_]+' /tmp/sync.log | sort | uniq -c | sort -rn
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Commit refreshed data
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add web/data
+          if git diff --cached --quiet; then
+            echo "No price changes — nothing to commit."
+            exit 0
+          fi
+          FILES=$(git diff --cached --name-only | wc -l | tr -d ' ')
+          git commit -m "Sync prices: $FILES files refreshed from ${{ steps.window.outputs.since }}"
+          git push

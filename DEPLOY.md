@@ -163,3 +163,84 @@ browser console for a blocked request, and make sure you are on `https`.
 
 **`npx vercel` says command not found** — install Node.js from
 <https://nodejs.org>, reopen the terminal, and try again.
+
+---
+
+## Making the Synchronize button work in production
+
+The dashboard is static, so nothing on the deployed site can run the retriever
+— it takes minutes and writes thousands of files. The work therefore happens on
+a GitHub Actions runner, and the button only has to *start* it.
+
+That also fixes the throttling problem: the price feed rate-limits by IP, and a
+developer machine that has been blocked stays blocked for hours. A runner gets a
+fresh address every time.
+
+```
+  System page  ──POST /api/sync──▶  Vercel function  ──workflow_dispatch──▶  GitHub Actions
+       ▲                              (holds the token)                          │
+       │                                                                  runs the retriever,
+       └──────── GET /api/sync-status ◀── run status ◀────────────────── commits web/data
+                                                                                  │
+                                              push to main ──▶ Vercel redeploys ──┘
+```
+
+### 1. Allow the workflow to push
+
+GitHub → repository **Settings → Actions → General → Workflow permissions** →
+**Read and write permissions** → Save. Without this the retrieval succeeds and
+the commit step fails.
+
+### 2. Create a token for the button
+
+<https://github.com/settings/personal-access-tokens/new> — a **fine-grained**
+token:
+
+| Field | Value |
+|---|---|
+| Resource owner | your account |
+| Repository access | **Only select repositories** → `ETF-Terminal` |
+| Permissions → **Actions** | **Read and write** |
+| Permissions → **Metadata** | Read-only (added automatically) |
+| Expiration | your call — the button stops working when it lapses |
+
+Copy the token once; GitHub will not show it again.
+
+### 3. Give it to Vercel
+
+Vercel → project → **Settings → Environment Variables**:
+
+| Name | Value | Required |
+|---|---|---|
+| `GH_DISPATCH_TOKEN` | the token from step 2 | yes |
+| `GH_REPO` | `MertGoker/ETF-Terminal` | only if auto-detection fails |
+| `GH_REF` | branch to run on (default `main`) | no |
+| `GH_WORKFLOW` | workflow file (default `sync.yml`) | no |
+
+Add them to **Production** (and Preview if you want the button there), then
+**Deployments → ⋯ → Redeploy** so the new variables are picked up.
+
+The token never reaches the browser: the page calls your own `/api/sync`, and
+the function calls GitHub.
+
+### 4. Check it
+
+Open the deployed site's **System** page and press **Run health check**. The
+Control plane banner should read **Dispatch ready** and name the repository and
+workflow. Press **Synchronize** — an *Open run on GitHub* link appears, and the
+banner tracks the run to completion.
+
+### Schedule
+
+`.github/workflows/sync.yml` runs **weekly, Saturdays at 23:10 UTC**. That
+default is deliberate: this repository is private, so Actions minutes come out
+of the account quota and a full pass over ~7,800 funds is not quick. The
+weekday line is one comment away in the file if the quota allows it.
+
+### A note on repository size
+
+Every run rewrites the data files, so the history grows by roughly the size of
+whatever changed. The repository already carries ~150 MB of prices. If it
+becomes unwieldy, the fix is to stop versioning the data: publish `web/data` to
+object storage (Cloudflare R2, a GitHub Release asset) and have the page fetch
+it from there. Nothing in the dashboard depends on the data being in git.

@@ -103,9 +103,52 @@ def opener():
         return _OPENER
 
 
+# Throttling is the failure that actually happens, and with a 90-second
+# ceiling on the backoff a throttled run can go minutes without printing
+# anything -- indistinguishable from a hang to anyone watching. Retries are
+# announced on a machine-readable line so the dashboard can classify them
+# live, de-duplicated per (reason, symbol) so a long run cannot flood the log.
+_SEEN_RETRY: set[tuple[str, str]] = set()
+_RETRY_LOCK = __import__("threading").Lock()
+
+
+def _signal(kind: str, code: str, subject: str, detail: str, wait: float | None = None) -> None:
+    """One structured diagnostic line: RETRY/GIVEUP, a code, and context."""
+    key = (code, subject)
+    if kind == "RETRY":
+        with _RETRY_LOCK:
+            if key in _SEEN_RETRY:
+                return
+            _SEEN_RETRY.add(key)
+    wait_s = f" wait={wait:.0f}s" if wait else ""
+    print(f"    ~ {kind} code={code} subject={subject}{wait_s} :: {detail}",
+          file=sys.stderr, flush=True)
+
+
+def _code_for(exc) -> tuple[str, str]:
+    """Map an exception onto a stable diagnostic code the API can group on."""
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code == 429:
+            return "rate_limited", "HTTP 429 Too Many Requests"
+        if exc.code == 999:
+            return "rate_limited", "HTTP 999 (venue throttle)"
+        if exc.code in (502, 503, 504):
+            return "upstream_5xx", f"HTTP {exc.code}"
+        if exc.code == 404:
+            return "not_found", "HTTP 404"
+        return "http_error", f"HTTP {exc.code}"
+    name = type(exc).__name__
+    if "Timeout" in name or "timed out" in str(exc).lower():
+        return "timeout", "request timed out"
+    if "URLError" in name or "gaierror" in name.lower():
+        return "network", str(exc)[:60]
+    return "error", f"{name}: {str(exc)[:50]}"
+
+
 def http_json(url: str, tries: int = 6, timeout: int = 30):
     """GET JSON with exponential backoff. Returns None once retries run out."""
     last = None
+    subject = url.rsplit("/", 1)[-1].split("?")[0][:24] or "request"
     for attempt in range(tries):
         req = urllib.request.Request(
             url, headers={"User-Agent": USER_AGENT, "Accept": "application/json",
@@ -121,14 +164,23 @@ def http_json(url: str, tries: int = 6, timeout: int = 30):
                 return None  # symbol does not exist; no point retrying
             if exc.code in (429, 999, 502, 503):
                 # Yahoo's throttle is IP-wide and sticky; back off generously.
-                time.sleep(min(90, 8.0 * (2 ** attempt)) + random.random() * 3)
+                wait = min(90, 8.0 * (2 ** attempt)) + random.random() * 3
+                code, detail = _code_for(exc)
+                _signal("RETRY", code, subject, detail, wait)
+                time.sleep(wait)
                 continue
+            code, detail = _code_for(exc)
+            _signal("RETRY", code, subject, detail, 1.5 * (attempt + 1))
             time.sleep(1.5 * (attempt + 1))
         except Exception as exc:  # timeouts, DNS blips, truncated bodies
             last = exc
-            time.sleep(2.0 * (attempt + 1) + random.random())
+            wait = 2.0 * (attempt + 1) + random.random()
+            code, detail = _code_for(exc)
+            _signal("RETRY", code, subject, detail, wait)
+            time.sleep(wait)
     if last is not None:
-        print(f"    ! give up: {url.split('/')[-1][:40]} ({last})", file=sys.stderr)
+        code, detail = _code_for(last)
+        _signal("GIVEUP", code, subject, f"{detail} after {tries} attempts")
     return None
 
 
